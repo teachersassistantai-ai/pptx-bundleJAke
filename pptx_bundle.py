@@ -1,181 +1,228 @@
 """pptx_bundle -- generated; do not edit. Bundles pptx_builder for Relevance.ai."""
 
 # === brand.py ===
-"""TAAI brand constants for pptx_builder.
+"""resolve_brand -- turn generative design_tokens into an internal brand dict.
 
-This module is intentionally a flat dict-only export. The same dict will
-be inlined into the Relevance.ai Python step in Plan 2; keeping it as a
-plain Python literal here ensures clean copy-paste.
+The renderer is fully token-driven. `design_tokens` is the dict described by
+DESIGN_TOKEN_SCHEMA in src/rai_builder/schema.py (palette / type / composition
+/ motif). `resolve_brand` converts those categorical token values into the
+concrete numbers (colours, point sizes, inch margins, gaps) the layout
+renderers consume. Nothing here is hardcoded per deck -- two different
+design_tokens inputs produce visibly different brand dicts.
+
+This module is a plain-function + dict export so it survives clean
+concatenation into the Relevance.ai bundle.
 """
 
-BRAND = {
-    "primary": "1A2747",
-    "accents": {
-        "mint":    "2EC4B6",
-        "coral":   "E76F51",
-        "mustard": "E9C46A",
-        "sand":    "C9B79C",
-        "sage":    "8AA67F",
+SLIDE_W = 13.333
+SLIDE_H = 7.5
+
+# Fallback hexes used only when a palette role is missing/malformed.
+_FALLBACK_PALETTE = {
+    "bg": "FFFFFF",
+    "ink": "1A2747",
+    "accent": "2EC4B6",
+    "accent_2": "E76F51",
+    "muted": "55617A",
+    "surface": "F1F1F1",
+}
+
+# type.scale -> a base point-size set. Sizes step up across the three scales.
+_TYPE_SCALES = {
+    "small": {
+        "title": 40, "heading": 24, "statement": 32, "body": 14,
+        "caption": 9, "stat": 64, "pillar_heading": 16, "section_number": 72,
     },
-    "text": {
-        "primary":   "1A2747",
-        "secondary": "55617A",
-        "inverse":   "FFFFFF",
+    "medium": {
+        "title": 54, "heading": 32, "statement": 44, "body": 18,
+        "caption": 11, "stat": 88, "pillar_heading": 20, "section_number": 96,
     },
-    "fonts": {
-        "header": "Georgia",
-        "body":   "Calibri",
-        "mono":   "Consolas",
-    },
-    "sizes_pt": {
-        "title":          54,
-        "heading":        32,
-        "body":           18,
-        "footer":         10,
-        "statement":      44,
-        "stat":           88,
-        "pillar_heading": 20,
-        "section_number": 96,
-    },
-    "slide_dimensions_in": {
-        "width":  13.333,
-        "height": 7.5,
-    },
-    "footer": {
-        "show_on": [
-            "single_statement", "two_up", "pillars_3", "pillars_4",
-            "process_flow", "compare_contrast", "stat_callout", "quote",
-            "chart", "data_table", "stat_doughnut", "quadrant_grid",
-            "callout_box", "recap",
-        ],
-        # title and section_divider intentionally omitted.
-    },
-    "severity_palette": {
-        "info":     "55617A",
-        "positive": "2EC4B6",
-        "warning":  "E9C46A",
-        "critical": "E76F51",
+    "large": {
+        "title": 66, "heading": 40, "statement": 56, "body": 22,
+        "caption": 13, "stat": 108, "pillar_heading": 24, "section_number": 120,
     },
 }
 
-# === palette.py ===
-"""Layout positioning metadata.
+# composition.margin -> outer inch margin.
+_MARGINS = {"narrow": 0.5, "standard": 0.75, "wide": 1.0}
 
-Each layout entry holds the geometric data renderers need (margins,
-column counts, etc.). Renderers in `pptx_builder.layouts.*` consume
-these to position shapes.
+# composition.density -> body-size delta + content breathing room.
+_DENSITY = {
+    "sparse":   {"body_delta": 2,  "block_gap": 0.35},
+    "balanced": {"body_delta": 0,  "block_gap": 0.22},
+    "dense":    {"body_delta": -2, "block_gap": 0.12},
+}
+
+# composition.whitespace -> inter-block gap multiplier.
+_WHITESPACE = {"tight": 0.7, "generous": 1.3}
+
+# type.tracking -> approximate spacing nudge (python-pptx has no real tracking).
+_TRACKING = {"tight": -0.3, "normal": 0.0, "wide": 0.6}
+
+# motif.weight -> relative thickness/scale of the motif element.
+_MOTIF_WEIGHT = {"light": 1.0, "bold": 2.2}
+
+
+def _pick(d, value, default_key):
+    """Safe categorical lookup -- unknown value falls back, never raises."""
+    if value in d:
+        return d[value]
+    return d[default_key]
+
+
+def _clean_hex(value, fallback):
+    """Coerce a hex-ish string to a 6-char hex with no leading #."""
+    if not isinstance(value, str):
+        return fallback
+    h = value.strip().lstrip("#")
+    if len(h) == 3:  # shorthand -> expand
+        h = "".join(c * 2 for c in h)
+    if len(h) != 6:
+        return fallback
+    try:
+        int(h, 16)
+    except ValueError:
+        return fallback
+    return h.upper()
+
+
+def resolve_brand(design_tokens):
+    """Turn design_tokens into the internal brand dict layout renderers consume.
+
+    Args:
+        design_tokens: dict matching DESIGN_TOKEN_SCHEMA. Missing keys are
+            tolerated -- every lookup has a defensive default.
+    Returns:
+        brand dict with keys: colours, fonts, header_case, tracking, sizes_pt,
+        composition, motif, slide_dimensions_in.
+    """
+    tokens = design_tokens if isinstance(design_tokens, dict) else {}
+    palette = tokens.get("palette", {}) or {}
+    type_t = tokens.get("type", {}) or {}
+    comp = tokens.get("composition", {}) or {}
+    motif = tokens.get("motif", {}) or {}
+
+    colours = {
+        role: _clean_hex(palette.get(role), _FALLBACK_PALETTE[role])
+        for role in _FALLBACK_PALETTE
+    }
+
+    scale_key = type_t.get("scale", "medium")
+    sizes = dict(_pick(_TYPE_SCALES, scale_key, "medium"))
+    density_key = comp.get("density", "balanced")
+    density = _pick(_DENSITY, density_key, "balanced")
+    # Density nudges body / pillar text without touching display sizes.
+    sizes["body"] = max(9, sizes["body"] + density["body_delta"])
+    sizes["pillar_heading"] = max(11, sizes["pillar_heading"] + density["body_delta"])
+
+    margin = _pick(_MARGINS, comp.get("margin", "standard"), "standard")
+    whitespace_mult = _pick(_WHITESPACE, comp.get("whitespace", "generous"), "generous")
+    block_gap = round(density["block_gap"] * whitespace_mult, 3)
+
+    return {
+        "colours": colours,
+        "fonts": {
+            "header": type_t.get("header_font", "Georgia"),
+            "body": type_t.get("body_font", "Calibri"),
+        },
+        "header_case": type_t.get("header_case", "title"),
+        "tracking": _pick(_TRACKING, type_t.get("tracking", "normal"), "normal"),
+        "sizes_pt": sizes,
+        "composition": {
+            "margin": margin,
+            "alignment": comp.get("alignment", "left"),
+            "density": density_key,
+            "block_gap": block_gap,
+            "whitespace": comp.get("whitespace", "generous"),
+        },
+        "motif": {
+            "kind": motif.get("kind", "none"),
+            "weight": _pick(_MOTIF_WEIGHT, motif.get("weight", "light"), "light"),
+        },
+        "slide_dimensions_in": {"width": SLIDE_W, "height": SLIDE_H},
+    }
+
+# === palette.py ===
+"""Token-driven geometry.
+
+The old renderer baked every box coordinate into a static PALETTE dict. This
+module replaces that: `compute_geometry(brand)` derives all box geometry from
+`brand["composition"]` (margins, block gap, alignment). Two different
+design_tokens -> two different geometries (margins shift, blocks move).
 
 All measurements in inches. Slide is 13.333 x 7.5 (16:9).
 """
 
-_DEFAULT_MARGIN = {"left": 0.75, "right": 0.75, "top": 0.6, "bottom": 0.6}
 
-PALETTE = {
-    "title": {
-        "margin_in": _DEFAULT_MARGIN,
-        "accent_block": {"left": 0.0, "top": 0.0, "width": 0.4, "height": 7.5},
-        "title_box":    {"left": 0.9, "top": 2.4, "width": 11.5, "height": 1.6},
-        "promise_box":  {"left": 0.9, "top": 4.2, "width": 11.5, "height": 1.0},
-        "byline_box":   {"left": 0.9, "top": 5.6, "width": 11.5, "height": 0.5},
-    },
-    "section_divider": {
-        "margin_in": _DEFAULT_MARGIN,
-        "accent_block": {"left": 0.0, "top": 0.0, "width": 13.333, "height": 1.0},
-        "number_box":   {"left": 0.75, "top": 2.0, "width": 4.0, "height": 2.5},
-        "title_box":    {"left": 0.75, "top": 4.8, "width": 11.5, "height": 1.4},
-    },
-    "single_statement": {
-        "margin_in": _DEFAULT_MARGIN,
-        "statement_box": {"left": 1.5, "top": 2.5, "width": 10.333, "height": 2.5},
-    },
-    "two_up": {
-        "margin_in": _DEFAULT_MARGIN,
-        "heading_box": {"left": 0.75, "top": 0.6, "width": 11.833, "height": 0.9},
-        "body_box":    {"left": 0.75, "top": 1.7, "width": 5.7, "height": 5.2},
-        "right_box":   {"left": 6.95, "top": 1.7, "width": 5.6, "height": 5.2},
-    },
-    "pillars_3": {
-        "margin_in": _DEFAULT_MARGIN,
-        "pillar_count": 3,
-        "heading_box": {"left": 0.75, "top": 0.6, "width": 11.833, "height": 0.9},
-        "columns":     {"top": 1.9, "icon_h": 0.6, "heading_h": 0.7, "body_h": 4.0, "gap": 0.4},
-    },
-    "pillars_4": {
-        "margin_in": _DEFAULT_MARGIN,
-        "pillar_count": 4,
-        "heading_box": {"left": 0.75, "top": 0.6, "width": 11.833, "height": 0.9},
-        "columns":     {"top": 1.9, "icon_h": 0.5, "heading_h": 0.7, "body_h": 4.0, "gap": 0.3},
-    },
-    "process_flow": {
-        "margin_in": _DEFAULT_MARGIN,
-        "heading_box": {"left": 0.75, "top": 0.6, "width": 11.833, "height": 0.9},
-        "chain":       {"top": 2.5, "height": 2.0, "gap": 0.25, "min": 4, "max": 6},
-        "detail_top":  4.8,
-    },
-    "compare_contrast": {
-        "margin_in": _DEFAULT_MARGIN,
-        "heading_box": {"left": 0.75, "top": 0.6, "width": 11.833, "height": 0.9},
-        "left_label":  {"left": 0.75, "top": 1.7, "width": 5.7, "height": 0.6},
-        "left_body":   {"left": 0.75, "top": 2.4, "width": 5.7, "height": 4.5},
-        "right_label": {"left": 6.95, "top": 1.7, "width": 5.6, "height": 0.6},
-        "right_body":  {"left": 6.95, "top": 2.4, "width": 5.6, "height": 4.5},
-    },
-    "stat_callout": {
-        "margin_in": _DEFAULT_MARGIN,
-        "stat_box":    {"left": 0.75, "top": 1.5, "width": 11.833, "height": 3.0},
-        "unit_box":    {"left": 0.75, "top": 4.5, "width": 11.833, "height": 0.7},
-        "context_box": {"left": 0.75, "top": 5.4, "width": 11.833, "height": 1.4},
-    },
-    "quote": {
-        "margin_in": _DEFAULT_MARGIN,
-        "mark_box":        {"left": 0.75, "top": 0.8, "width": 2.0, "height": 1.5},
-        "quote_box":       {"left": 0.75, "top": 2.0, "width": 11.833, "height": 3.2},
-        "attribution_box": {"left": 0.75, "top": 5.4, "width": 11.833, "height": 0.7},
-    },
-    "chart": {
-        "margin_in": _DEFAULT_MARGIN,
-        "heading_box": {"left": 0.75, "top": 0.6, "width": 11.833, "height": 0.9},
-        "chart_box":   {"left": 0.75, "top": 1.7, "width": 11.833, "height": 4.6},
-        "caption_box": {"left": 0.75, "top": 6.4, "width": 11.833, "height": 0.5},
-    },
-    "recap": {
-        "margin_in": _DEFAULT_MARGIN,
-        "heading_box":     {"left": 0.75, "top": 0.6, "width": 11.833, "height": 0.9},
-        "takeaways_box":   {"left": 0.75, "top": 1.7, "width": 7.5, "height": 4.5},
-        "next_step_box":   {"left": 8.5, "top": 1.7, "width": 4.0, "height": 4.5},
-        "signoff_box":     {"left": 0.75, "top": 6.5, "width": 11.833, "height": 0.5},
-    },
-    "data_table": {
-        "margin_in": _DEFAULT_MARGIN,
-        "heading_box": {"left": 0.75, "top": 0.6, "width": 11.833, "height": 0.9},
-        "table_box":   {"left": 0.75, "top": 1.7, "width": 11.833, "height": 4.8},
-        "max_rows": 5,
-        "max_cols": 4,
-    },
-    "stat_doughnut": {
-        "margin_in": _DEFAULT_MARGIN,
-        "heading_box":   {"left": 0.75, "top": 0.6, "width": 11.833, "height": 0.9},
-        "doughnut_top":  1.9,
-        "doughnut_size": 3.2,
-        "doughnut_count": 3,
-        "label_top": 5.4,
-    },
-    "quadrant_grid": {
-        "margin_in": _DEFAULT_MARGIN,
-        "heading_box": {"left": 0.75, "top": 0.6, "width": 11.833, "height": 0.9},
-        "grid_left": 1.5, "grid_top": 1.9,
-        "cell_width": 5.0, "cell_height": 2.4, "cell_gap": 0.3,
-    },
-    "callout_box": {
-        "margin_in": _DEFAULT_MARGIN,
-        "container":   {"left": 1.0, "top": 1.8, "width": 11.333, "height": 4.5},
-        "heading_box": {"left": 1.4, "top": 2.0, "width": 10.5, "height": 0.8},
-        "body_box":    {"left": 1.4, "top": 3.0, "width": 10.5, "height": 3.0},
-    },
-}
+
+def compute_geometry(brand):
+    """Return a geometry dict the layout renderers consume.
+
+    Everything is a function of the resolved composition tokens. The renderer
+    never reads hardcoded coordinates -- it reads this.
+    """
+    comp = brand["composition"]
+    m = comp["margin"]                       # outer margin (in)
+    gap = comp["block_gap"]                  # inter-block gap (in)
+    align = comp["alignment"]                # left | centered | asymmetric
+
+    content_w = SLIDE_W - 2 * m
+    content_h = SLIDE_H - 2 * m
+
+    # Asymmetric layouts nudge the content origin right, creating a wider
+    # left margin -- a visible compositional signature.
+    asym = 0.0
+    if align == "asymmetric":
+        asym = round(m * 0.9, 3)
+
+    body_left = m + asym
+    body_w = content_w - asym
+
+    # Standard heading band sits at the top, content begins below it.
+    heading_h = 0.95
+    heading_top = m
+    content_top = heading_top + heading_h + gap
+
+    return {
+        "slide_w": SLIDE_W,
+        "slide_h": SLIDE_H,
+        "margin": m,
+        "gap": gap,
+        "alignment": align,
+        "content_w": content_w,
+        "content_h": content_h,
+        "body_left": body_left,
+        "body_w": body_w,
+        "heading_top": heading_top,
+        "heading_h": heading_h,
+        "content_top": content_top,
+        "content_bottom": SLIDE_H - m,
+        "asym": asym,
+    }
+
+
+def heading_box(geom):
+    """The standard top heading band (left, top, width, height)."""
+    return (geom["margin"], geom["heading_top"], geom["content_w"], geom["heading_h"])
+
+
+def body_region(geom):
+    """The region below the heading band: (left, top, width, height)."""
+    top = geom["content_top"]
+    return (geom["body_left"], top, geom["body_w"], geom["content_bottom"] - top)
 
 # === helpers.py ===
-"""Shared utilities for layout renderers."""
+"""Shared utilities for the token-driven layout renderers.
+
+Everything visual flows through here: colours come from `brand["colours"]`,
+fonts from `brand["fonts"]`, point sizes from `brand["sizes_pt"]`. Layout
+renderers never hardcode a hex, a family, or a size.
+
+Also home to:
+  * header-case transform (type.header_case)
+  * count-guard hardening (VARIANT_ELEMENT_COUNTS, iteration-0 carry-forward)
+  * motif drawing (all five motif kinds)
+"""
 
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
@@ -183,755 +230,963 @@ from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Inches, Pt
 
 
+# --- colour -----------------------------------------------------------------
+
 def hex_to_rgb(hex_str):
-    h = hex_str.lstrip("#")
+    h = (hex_str or "000000").lstrip("#")
+    if len(h) != 6:
+        h = "000000"
     return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
 
 
-def resolve_colour(brand, accent, role):
-    """Map a role name to a hex string using brand + accent name.
-
-    Roles:
-      accent           -> brand.accents[accent]
-      primary          -> brand.primary
-      inverse          -> brand.text.inverse
-      text_primary     -> brand.text.primary
-      text_secondary   -> brand.text.secondary
-    """
-    if role == "accent":
-        return brand["accents"][accent]
-    if role == "primary":
-        return brand["primary"]
-    if role == "inverse":
-        return brand["text"]["inverse"]
-    if role.startswith("text_"):
-        return brand["text"][role[len("text_"):]]
-    if role in brand["text"]:
-        return brand["text"][role]
-    raise ValueError(f"Unknown colour role: {role!r}")
+def colour(brand, role):
+    """Resolve a palette role to a hex string. Unknown role -> ink."""
+    return brand["colours"].get(role, brand["colours"]["ink"])
 
 
-def resolve_severity_colour(brand, severity):
-    return brand["severity_palette"][severity]
+def _relative_luminance(hex_str):
+    """WCAG-ish relative luminance for contrast-aware text colour choice."""
+    h = (hex_str or "000000").lstrip("#")
+    if len(h) != 6:
+        return 0.0
+    chan = []
+    for i in (0, 2, 4):
+        c = int(h[i:i + 2], 16) / 255.0
+        c = c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+        chan.append(c)
+    return 0.2126 * chan[0] + 0.7152 * chan[1] + 0.0722 * chan[2]
+
+
+def readable_on(brand, fill_hex):
+    """Pick bg or ink (whichever contrasts the fill better) for text on a fill."""
+    fill_l = _relative_luminance(fill_hex)
+    ink_l = _relative_luminance(colour(brand, "ink"))
+    bg_l = _relative_luminance(colour(brand, "bg"))
+
+    def ratio(a, b):
+        hi, lo = max(a, b), min(a, b)
+        return (hi + 0.05) / (lo + 0.05)
+
+    return colour(brand, "ink") if ratio(fill_l, ink_l) >= ratio(fill_l, bg_l) \
+        else colour(brand, "bg")
+
+
+# --- text -------------------------------------------------------------------
+
+def apply_header_case(brand, text):
+    """Apply type.header_case to header text at render time."""
+    text = "" if text is None else str(text)
+    case = brand.get("header_case", "title")
+    if case == "upper":
+        return text.upper()
+    if case == "sentence":
+        return text[:1].upper() + text[1:] if text else text
+    if case == "title":
+        # Title-case but keep short connectors lowercase for a designed look.
+        small = {"a", "an", "the", "of", "and", "or", "to", "in", "on", "for", "with"}
+        words = text.split()
+        out = []
+        for idx, w in enumerate(words):
+            lw = w.lower()
+            if idx != 0 and lw in small:
+                out.append(lw)
+            else:
+                out.append(w[:1].upper() + w[1:].lower() if w else w)
+        return " ".join(out)
+    return text
 
 
 def add_text_box(
-    slide,
+    slide, brand,
     left_in, top_in, width_in, height_in,
     text,
-    font_family,
+    font_role,            # "header" | "body"
     size_pt,
     colour_hex,
-    align=None,
+    align="left",
     anchor="top",
     bold=False,
+    is_header=False,
 ):
+    """Add a single-paragraph text box, fully token-driven.
+
+    `font_role` selects the family from brand["fonts"]. `is_header` triggers
+    the header-case transform.
+    """
     tb = slide.shapes.add_textbox(
-        Inches(left_in), Inches(top_in),
-        Inches(width_in), Inches(height_in),
+        Inches(left_in), Inches(top_in), Inches(width_in), Inches(height_in)
     )
     tf = tb.text_frame
     tf.word_wrap = True
-    if anchor == "middle":
-        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
-    elif anchor == "bottom":
-        tf.vertical_anchor = MSO_ANCHOR.BOTTOM
-    else:
-        tf.vertical_anchor = MSO_ANCHOR.TOP
+    tf.vertical_anchor = {
+        "middle": MSO_ANCHOR.MIDDLE, "bottom": MSO_ANCHOR.BOTTOM,
+    }.get(anchor, MSO_ANCHOR.TOP)
+
     p = tf.paragraphs[0]
-    p.text = text or ""
-    if align == "center":
-        p.alignment = PP_ALIGN.CENTER
-    elif align == "right":
-        p.alignment = PP_ALIGN.RIGHT
-    else:
-        p.alignment = PP_ALIGN.LEFT
+    rendered = apply_header_case(brand, text) if is_header else ("" if text is None else str(text))
+    p.text = rendered
+    p.alignment = {
+        "center": PP_ALIGN.CENTER, "right": PP_ALIGN.RIGHT,
+    }.get(align, PP_ALIGN.LEFT)
+
+    family = brand["fonts"].get(font_role, brand["fonts"]["body"])
     if p.runs:
         run = p.runs[0]
-        run.font.name = font_family
+        run.font.name = family
         run.font.size = Pt(size_pt)
         run.font.color.rgb = hex_to_rgb(colour_hex)
         run.font.bold = bold
+        # Approximate tracking via character spacing where pptx allows it.
+        try:
+            run.font._rPr.set("spc", str(int(Pt(brand.get("tracking", 0.0)))))
+        except Exception:
+            pass
     return tb
 
 
-def add_filled_rect(slide, left_in, top_in, width_in, height_in, fill_hex, line=False):
+def add_multiline(
+    slide, brand,
+    left_in, top_in, width_in, height_in,
+    lines,
+    font_role, size_pt, colour_hex,
+    align="left", anchor="top", bullet=False,
+):
+    """Add a multi-paragraph text box (one paragraph per line)."""
+    tb = slide.shapes.add_textbox(
+        Inches(left_in), Inches(top_in), Inches(width_in), Inches(height_in)
+    )
+    tf = tb.text_frame
+    tf.word_wrap = True
+    tf.vertical_anchor = {
+        "middle": MSO_ANCHOR.MIDDLE, "bottom": MSO_ANCHOR.BOTTOM,
+    }.get(anchor, MSO_ANCHOR.TOP)
+    family = brand["fonts"].get(font_role, brand["fonts"]["body"])
+    pp_align = {
+        "center": PP_ALIGN.CENTER, "right": PP_ALIGN.RIGHT,
+    }.get(align, PP_ALIGN.LEFT)
+
+    items = list(lines) if lines else [""]
+    for idx, line in enumerate(items):
+        p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
+        text = "" if line is None else str(line)
+        p.text = ("- " + text) if bullet else text
+        p.alignment = pp_align
+        if p.runs:
+            run = p.runs[0]
+            run.font.name = family
+            run.font.size = Pt(size_pt)
+            run.font.color.rgb = hex_to_rgb(colour_hex)
+    return tb
+
+
+# --- shapes -----------------------------------------------------------------
+
+def _add_shape(slide, shape_enum, left, top, width, height, fill_hex, line_hex=None):
     shape = slide.shapes.add_shape(
-        MSO_SHAPE.RECTANGLE,
-        Inches(left_in), Inches(top_in),
-        Inches(width_in), Inches(height_in),
+        shape_enum, Inches(left), Inches(top), Inches(width), Inches(height)
     )
     shape.fill.solid()
     shape.fill.fore_color.rgb = hex_to_rgb(fill_hex)
-    if not line:
+    if line_hex is None:
         shape.line.fill.background()
+    else:
+        shape.line.color.rgb = hex_to_rgb(line_hex)
+        shape.line.width = Pt(1.25)
+    shape.shadow.inherit = False
     return shape
 
 
-def add_rounded_rect(slide, left_in, top_in, width_in, height_in, fill_hex, line=False):
-    shape = slide.shapes.add_shape(
-        MSO_SHAPE.ROUNDED_RECTANGLE,
-        Inches(left_in), Inches(top_in),
-        Inches(width_in), Inches(height_in),
-    )
-    shape.fill.solid()
-    shape.fill.fore_color.rgb = hex_to_rgb(fill_hex)
-    if not line:
-        shape.line.fill.background()
-    return shape
+def add_filled_rect(slide, left, top, width, height, fill_hex, line_hex=None):
+    return _add_shape(slide, MSO_SHAPE.RECTANGLE, left, top, width, height,
+                      fill_hex, line_hex)
 
 
-def add_oval(slide, left_in, top_in, width_in, height_in, fill_hex, line=False):
-    shape = slide.shapes.add_shape(
-        MSO_SHAPE.OVAL,
-        Inches(left_in), Inches(top_in),
-        Inches(width_in), Inches(height_in),
-    )
-    shape.fill.solid()
-    shape.fill.fore_color.rgb = hex_to_rgb(fill_hex)
-    if not line:
-        shape.line.fill.background()
-    return shape
+def add_rounded_rect(slide, left, top, width, height, fill_hex, line_hex=None):
+    return _add_shape(slide, MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width,
+                      height, fill_hex, line_hex)
+
+
+def add_oval(slide, left, top, width, height, fill_hex, line_hex=None):
+    return _add_shape(slide, MSO_SHAPE.OVAL, left, top, width, height,
+                      fill_hex, line_hex)
+
+
+def fill_background(slide, brand):
+    """Paint the slide background with the palette bg colour."""
+    geom = brand["slide_dimensions_in"]
+    rect = add_filled_rect(slide, 0, 0, geom["width"], geom["height"],
+                           colour(brand, "bg"))
+    # Send to back so subsequent shapes layer on top.
+    sp = rect._element
+    sp.getparent().remove(sp)
+    slide.shapes._spTree.insert(2, sp)
+    return rect
+
+
+# --- motif ------------------------------------------------------------------
+
+def draw_motif(slide, brand):
+    """Draw the per-deck motif on a content slide in the accent colour.
+
+    Implements all five motif kinds. `motif.weight` scales thickness/size.
+    A `none` kind is a safe no-op.
+    """
+    motif = brand.get("motif", {})
+    kind = motif.get("kind", "none")
+    if kind == "none":
+        return
+    weight = motif.get("weight", 1.0)
+    accent = colour(brand, "accent")
+    dims = brand["slide_dimensions_in"]
+    w, h = dims["width"], dims["height"]
+
+    if kind == "corner_block":
+        size = round(0.55 * weight, 3)
+        add_filled_rect(slide, w - size, 0, size, size, accent)
+
+    elif kind == "side_rule":
+        bar = round(0.12 * weight, 3)
+        add_filled_rect(slide, 0, 0, bar, h, accent)
+
+    elif kind == "dot_grid":
+        dot = round(0.07 * weight, 3)
+        step = 0.42
+        y = h - 1.0
+        x = w - 1.6
+        for row in range(3):
+            for col in range(5):
+                add_oval(slide, x + col * step, y + row * step, dot, dot, accent)
+
+    elif kind == "baseline_rule":
+        bar = round(0.05 * weight, 3)
+        margin = brand["composition"]["margin"]
+        add_filled_rect(slide, margin, h - margin + 0.1,
+                        w - 2 * margin, bar, accent)
+
+
+# --- count-guard hardening (iteration-0 carry-forward) ----------------------
+
+def coerce_count(items, min_n, max_n, filler):
+    """Pad/truncate a list to [min_n, max_n] -- never raises.
+
+    `filler` is a zero-arg callable producing a placeholder element used to
+    pad a short list.
+    """
+    out = list(items) if isinstance(items, (list, tuple)) else []
+    if len(out) > max_n:
+        out = out[:max_n]
+    while len(out) < min_n:
+        out.append(filler())
+    return out
+
+
+def coerce_int(value, default=0):
+    """Coerce a possibly-string value to int -- safe for `:02d` formatting."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        digits = value.strip().lstrip("+-")
+        if digits.isdigit():
+            n = int(digits)
+            return -n if value.strip().startswith("-") else n
+    return default
+
+
+def as_text(value, default=""):
+    """Coerce any value to a string for safe rendering."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    return default
 
 # === layouts/title.py ===
-"""title layout: typography hero + left-edge accent block."""
+"""statement family / title variant: typography hero + accent edge block."""
 
 
 
+def _render_title(slide, spec, brand, geom):
+    sizes = brand["sizes_pt"]
+    align = "center" if geom["alignment"] == "centered" else "left"
 
-def _render_title(slide, spec, brand, accent):
-    layout = PALETTE["title"]
+    # Accent edge block -- left rail, full height. Width scales with motif.
+    rail = round(0.35 + 0.15 * brand["motif"]["weight"], 3)
+    add_filled_rect(slide, 0, 0, rail, geom["slide_h"], colour(brand, "accent"))
 
-    a = layout["accent_block"]
-    add_filled_rect(slide, a["left"], a["top"], a["width"], a["height"],
-                    fill_hex=brand["accents"][accent])
+    left = geom["body_left"]
+    width = geom["body_w"]
 
-    t = layout["title_box"]
     add_text_box(
-        slide,
-        t["left"], t["top"], t["width"], t["height"],
-        text=spec["title"],
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["title"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-        bold=True,
+        slide, brand, left, 2.3, width, 1.7,
+        as_text(spec.get("title"), "Untitled"),
+        "header", sizes["title"], colour(brand, "ink"),
+        align=align, bold=True, is_header=True,
     )
-
-    p = layout["promise_box"]
     add_text_box(
-        slide,
-        p["left"], p["top"], p["width"], p["height"],
-        text=spec["promise"],
-        font_family=brand["fonts"]["body"],
-        size_pt=brand["sizes_pt"]["heading"],
-        colour_hex=resolve_colour(brand, accent, "text_secondary"),
+        slide, brand, left, 4.15, width, 1.0,
+        as_text(spec.get("promise")),
+        "body", sizes["heading"], colour(brand, "muted"),
+        align=align,
     )
-
-    b = layout["byline_box"]
     add_text_box(
-        slide,
-        b["left"], b["top"], b["width"], b["height"],
-        text=spec["byline"],
-        font_family=brand["fonts"]["body"],
-        size_pt=brand["sizes_pt"]["body"],
-        colour_hex=resolve_colour(brand, accent, "accent"),
+        slide, brand, left, 5.5, width, 0.5,
+        as_text(spec.get("byline")),
+        "body", sizes["body"], colour(brand, "accent"),
+        align=align,
     )
 
 # === layouts/section_divider.py ===
-"""section_divider layout: accent band, large numeral, section title."""
+"""statement family / section_divider variant: accent band, numeral, title."""
 
+def _render_section_divider(slide, spec, brand, geom):
+    sizes = brand["sizes_pt"]
 
+    # Top accent band -- height scales with motif weight.
+    band_h = round(0.8 + 0.3 * brand["motif"]["weight"], 3)
+    add_filled_rect(slide, 0, 0, geom["slide_w"], band_h, colour(brand, "accent"))
 
+    left = geom["body_left"]
+    width = geom["body_w"]
+    align = "center" if geom["alignment"] == "centered" else "left"
 
-def _render_section_divider(slide, spec, brand, accent):
-    layout = PALETTE["section_divider"]
-
-    a = layout["accent_block"]
-    add_filled_rect(slide, a["left"], a["top"], a["width"], a["height"],
-                    fill_hex=brand["accents"][accent])
-
-    n = layout["number_box"]
+    # section_number coerced to int BEFORE any :02d-style format.
+    number = coerce_int(spec.get("section_number"), 0)
     add_text_box(
-        slide,
-        n["left"], n["top"], n["width"], n["height"],
-        text=f"{spec['section_number']:02d}",
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["section_number"],
-        colour_hex=resolve_colour(brand, accent, "accent"),
-        bold=True,
+        slide, brand, left, band_h + 0.6, 4.5, 2.5,
+        "%02d" % number,
+        "header", sizes["section_number"], colour(brand, "accent"),
+        bold=True, align=align,
     )
-
-    t = layout["title_box"]
     add_text_box(
-        slide,
-        t["left"], t["top"], t["width"], t["height"],
-        text=spec["title"],
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["title"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-        bold=True,
+        slide, brand, left, geom["slide_h"] - 2.6, width, 1.6,
+        as_text(spec.get("title"), "Section"),
+        "header", sizes["title"], colour(brand, "ink"),
+        bold=True, is_header=True, align=align,
     )
 
 # === layouts/single_statement.py ===
-"""single_statement layout: one centred line, big type, lots of white space."""
+"""statement family / single_statement variant: one centred line, big type.
 
-
-
-
-def _render_single_statement(slide, spec, brand, accent):
-    layout = PALETTE["single_statement"]
-    box = layout["statement_box"]
-    add_text_box(
-        slide,
-        box["left"], box["top"], box["width"], box["height"],
-        text=spec["statement"],
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["statement"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-        align="center",
-        anchor="middle",
-    )
-
-# === layouts/two_up.py ===
-"""two_up layout: heading across the top, body on the left, configurable
-right-side block: quote / stat / diagram-placeholder / mini-chart caption.
+This is also the universal safe fallback when a variant is unknown.
 """
 
 
 
-
-def _render_right_quote(slide, box, content, brand, accent):
-    add_text_box(
-        slide,
-        box["left"], box["top"], box["width"], box["height"] - 0.8,
-        text=f"“{content['quote']}”",
-        font_family=brand["fonts"]["header"],
-        size_pt=24,
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
+def _render_single_statement(slide, spec, brand, geom):
+    sizes = brand["sizes_pt"]
+    # Statement reads from `statement`, else any title-ish field.
+    text = (
+        spec.get("statement")
+        or spec.get("title")
+        or spec.get("heading")
+        or spec.get("quote")
     )
+    align = "left" if geom["alignment"] == "asymmetric" else "center"
     add_text_box(
-        slide,
-        box["left"], box["top"] + box["height"] - 0.7,
-        box["width"], 0.5,
-        text=f"— {content['attribution']}",
-        font_family=brand["fonts"]["body"],
-        size_pt=14,
-        colour_hex=resolve_colour(brand, accent, "text_secondary"),
+        slide, brand, geom["body_left"], 2.4, geom["body_w"], 2.7,
+        as_text(text, ""),
+        "header", sizes["statement"], colour(brand, "ink"),
+        align=align, anchor="middle",
     )
 
+# === layouts/recap.py ===
+"""statement family / recap variant: bulleted takeaways + next-step pointer."""
 
-def _render_right_stat(slide, box, content, brand, accent):
+
+
+def _render_recap(slide, spec, brand, geom):
+    sizes = brand["sizes_pt"]
+    left, top, width, height = (
+        geom["body_left"], geom["heading_top"],
+        geom["body_w"], geom["heading_h"],
+    )
+
     add_text_box(
-        slide,
-        box["left"], box["top"], box["width"], 2.0,
-        text=f"{content['stat']}{content.get('unit', '')}",
-        font_family=brand["fonts"]["header"],
-        size_pt=72,
-        colour_hex=resolve_colour(brand, accent, "accent"),
+        slide, brand, left, top, width, height,
+        "Takeaways", "header", sizes["heading"], colour(brand, "ink"),
+        bold=True, is_header=True,
+    )
+
+    content_top = geom["content_top"]
+    split = left + width * 0.62
+    takeaways = spec.get("takeaways")
+    if not isinstance(takeaways, list):
+        takeaways = [as_text(takeaways)] if takeaways else []
+    add_multiline(
+        slide, brand, left, content_top, width * 0.58,
+        geom["content_bottom"] - content_top,
+        [as_text(t) for t in takeaways],
+        "body", sizes["body"], colour(brand, "ink"), bullet=True,
+    )
+
+    add_text_box(
+        slide, brand, split, content_top, width * 0.38, 0.5,
+        "Next step", "header", sizes["pillar_heading"],
+        colour(brand, "accent"), bold=True, is_header=True,
+    )
+    add_text_box(
+        slide, brand, split, content_top + 0.65, width * 0.38,
+        geom["content_bottom"] - content_top - 0.65,
+        as_text(spec.get("next_step")),
+        "body", sizes["body"], colour(brand, "ink"),
+    )
+
+# === layouts/stat_callout.py ===
+"""focus family / stat_callout variant: hero number with unit + context."""
+
+
+
+def _render_stat_callout(slide, spec, brand, geom):
+    sizes = brand["sizes_pt"]
+    left = geom["body_left"]
+    width = geom["body_w"]
+    align = "left" if geom["alignment"] == "asymmetric" else "center"
+
+    stat = as_text(spec.get("stat"))
+    unit = as_text(spec.get("unit"))
+    # Hero number, then the unit on its own line (smaller), then context.
+    # stat and unit must never be concatenated -- "2" + "hours" -> "2hours".
+    add_text_box(
+        slide, brand, left, 1.5, width, 2.4,
+        stat,
+        "header", sizes["stat"], colour(brand, "accent"),
+        align=align, anchor="middle", bold=True,
+    )
+    if unit:
+        add_text_box(
+            slide, brand, left, 3.85, width, 0.8,
+            unit,
+            "header", sizes["heading"], colour(brand, "ink"),
+            align=align, anchor="top", bold=True,
+        )
+    add_text_box(
+        slide, brand, left, 4.8, width, 1.6,
+        as_text(spec.get("context")),
+        "body", sizes["heading"], colour(brand, "muted"),
+        align=align,
+    )
+
+# === layouts/quote.py ===
+"""focus family / quote variant: oversized quote mark + body + attribution."""
+
+
+
+def _render_quote(slide, spec, brand, geom):
+    sizes = brand["sizes_pt"]
+    left = geom["body_left"]
+    width = geom["body_w"]
+
+    # Oversized opening mark in the accent colour.
+    add_text_box(
+        slide, brand, left, 0.6, 2.2, 1.7,
+        "“",
+        "header", int(sizes["section_number"] * 1.6), colour(brand, "accent"),
         bold=True,
-        anchor="middle",
     )
     add_text_box(
-        slide,
-        box["left"], box["top"] + 2.2,
-        box["width"], box["height"] - 2.2,
-        text=content["context"],
-        font_family=brand["fonts"]["body"],
-        size_pt=16,
-        colour_hex=resolve_colour(brand, accent, "text_secondary"),
+        slide, brand, left, 2.1, width, 3.2,
+        as_text(spec.get("quote")),
+        "header", sizes["heading"], colour(brand, "ink"),
+    )
+    add_text_box(
+        slide, brand, left, 5.5, width, 0.7,
+        "- " + as_text(spec.get("attribution")),
+        "body", sizes["body"], colour(brand, "muted"),
+    )
+
+# === layouts/two_up.py ===
+"""split family / two_up variant: heading, body left, configurable right block.
+
+right_block_type is one of quote | stat | diagram (chart treated as diagram).
+"""
+
+
+
+def _heading(slide, spec, brand, geom):
+    add_text_box(
+        slide, brand, geom["margin"], geom["heading_top"],
+        geom["content_w"], geom["heading_h"],
+        as_text(spec.get("heading")),
+        "header", brand["sizes_pt"]["heading"], colour(brand, "ink"),
+        bold=True, is_header=True,
     )
 
 
-def _render_right_diagram(slide, box, content, brand, accent):
+def _right_quote(slide, box, content, brand):
+    sizes = brand["sizes_pt"]
+    left, top, width, height = box
     add_text_box(
-        slide,
-        box["left"], box["top"], box["width"], box["height"],
-        text=content.get("caption", "[diagram placeholder]"),
-        font_family=brand["fonts"]["body"],
-        size_pt=16,
-        colour_hex=resolve_colour(brand, accent, "text_secondary"),
+        slide, brand, left, top, width, height - 0.8,
+        "“" + as_text(content.get("quote")) + "”",
+        "header", sizes["pillar_heading"] + 4, colour(brand, "ink"),
+    )
+    add_text_box(
+        slide, brand, left, top + height - 0.7, width, 0.5,
+        "- " + as_text(content.get("attribution")),
+        "body", sizes["body"], colour(brand, "muted"),
+    )
+
+
+def _right_stat(slide, box, content, brand):
+    sizes = brand["sizes_pt"]
+    left, top, width, height = box
+    unit = as_text(content.get("unit"))
+    # Hero number, then unit on its own line, then context. stat and unit
+    # are never concatenated.
+    add_text_box(
+        slide, brand, left, top, width, 1.5,
+        as_text(content.get("stat")),
+        "header", sizes["stat"] - 24, colour(brand, "accent"),
+        bold=True, anchor="middle", align="center",
+    )
+    if unit:
+        add_text_box(
+            slide, brand, left, top + 1.5, width, 0.5,
+            unit,
+            "header", sizes["body"] + 2, colour(brand, "ink"),
+            bold=True, anchor="top", align="center",
+        )
+    add_text_box(
+        slide, brand, left, top + 2.2, width, height - 2.2,
+        as_text(content.get("context")),
+        "body", sizes["body"], colour(brand, "muted"),
         align="center",
-        anchor="middle",
     )
 
 
-_RIGHT_RENDERERS = {
-    "quote":   _render_right_quote,
-    "stat":    _render_right_stat,
-    "diagram": _render_right_diagram,
-    "chart":   _render_right_diagram,
+def _right_diagram(slide, box, content, brand):
+    left, top, width, height = box
+    add_text_box(
+        slide, brand, left, top, width, height,
+        as_text(content.get("caption"), "[diagram]"),
+        "body", brand["sizes_pt"]["body"], colour(brand, "muted"),
+        align="center", anchor="middle",
+    )
+
+
+_RIGHT = {
+    "quote": _right_quote,
+    "stat": _right_stat,
+    "diagram": _right_diagram,
+    "chart": _right_diagram,
 }
 
 
-def _render_two_up(slide, spec, brand, accent):
-    layout = PALETTE["two_up"]
+def _render_two_up(slide, spec, brand, geom):
+    _heading(slide, spec, brand, geom)
+    sizes = brand["sizes_pt"]
+    top = geom["content_top"]
+    height = geom["content_bottom"] - top
+    gap = geom["gap"]
+    left = geom["body_left"]
+    col_w = (geom["body_w"] - gap) / 2.0
 
-    h = layout["heading_box"]
     add_text_box(
-        slide,
-        h["left"], h["top"], h["width"], h["height"],
-        text=spec["heading"],
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["heading"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-        bold=True,
+        slide, brand, left, top, col_w, height,
+        as_text(spec.get("body")),
+        "body", sizes["body"], colour(brand, "ink"),
     )
 
-    b = layout["body_box"]
+    right_left = left + col_w + gap
+    # Surface-tinted card behind the right block for visual weight.
+    add_filled_rect(slide, right_left, top, col_w, height, colour(brand, "surface"))
+
+    rtype = spec.get("right_block_type", "diagram")
+    content = spec.get("right_block_content")
+    if not isinstance(content, dict):
+        content = {}
+    pad = 0.3
+    box = (right_left + pad, top + pad, col_w - 2 * pad, height - 2 * pad)
+    _RIGHT.get(rtype, _right_diagram)(slide, box, content, brand)
+
+# === layouts/compare_contrast.py ===
+"""split family / compare_contrast variant: heading + two labelled columns."""
+
+
+
+def _render_compare_contrast(slide, spec, brand, geom):
+    sizes = brand["sizes_pt"]
     add_text_box(
-        slide,
-        b["left"], b["top"], b["width"], b["height"],
-        text=spec["body"],
-        font_family=brand["fonts"]["body"],
-        size_pt=brand["sizes_pt"]["body"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
+        slide, brand, geom["margin"], geom["heading_top"],
+        geom["content_w"], geom["heading_h"],
+        as_text(spec.get("heading")),
+        "header", sizes["heading"], colour(brand, "ink"),
+        bold=True, is_header=True,
     )
 
-    r = layout["right_box"]
-    right_type = spec.get("right_block_type", "diagram")
-    renderer = _RIGHT_RENDERERS.get(right_type, _render_right_diagram)
-    renderer(slide, r, spec["right_block_content"], brand, accent)
+    top = geom["content_top"]
+    height = geom["content_bottom"] - top
+    gap = geom["gap"]
+    left = geom["body_left"]
+    col_w = (geom["body_w"] - gap) / 2.0
+
+    for idx, side in enumerate(("left", "right")):
+        x = left + idx * (col_w + gap)
+        accent_role = "accent" if side == "left" else "accent_2"
+        add_text_box(
+            slide, brand, x, top, col_w, 0.6,
+            as_text(spec.get(side + "_label")),
+            "header", sizes["pillar_heading"], colour(brand, accent_role),
+            bold=True, is_header=True,
+        )
+        points = spec.get(side + "_points")
+        if not isinstance(points, list):
+            points = [as_text(points)] if points else []
+        add_multiline(
+            slide, brand, x, top + 0.7, col_w, height - 0.7,
+            [as_text(p) for p in points],
+            "body", sizes["body"], colour(brand, "ink"), bullet=True,
+        )
 
 # === layouts/pillars.py ===
-"""pillars layout: heading across top, N equal-width columns below."""
+"""grid family / pillars_3 + pillars_4 variants: heading + N equal columns.
+
+Count is enforced by VARIANT_ELEMENT_COUNTS: pillars_3 -> exactly 3,
+pillars_4 -> exactly 4. A wrong count is padded/truncated, never raised.
+"""
+
+def _empty_pillar():
+    return {"icon_glyph": "", "heading": "", "body": ""}
 
 
+def _render_pillars(slide, spec, brand, geom):
+    sizes = brand["sizes_pt"]
+    variant = spec.get("variant", "pillars_3")
+    count = 4 if variant == "pillars_4" else 3
 
-def _render_pillars(slide, spec, brand, accent):
-    layout_id = spec["layout"]
-    layout = PALETTE[layout_id]
-    count = layout["pillar_count"]
-    pillars = spec["pillars"]
-    if len(pillars) != count:
-        raise ValueError(
-            f"{layout_id} expects {count} pillars, spec has {len(pillars)}"
-        )
-
-    h = layout["heading_box"]
     add_text_box(
-        slide,
-        h["left"], h["top"], h["width"], h["height"],
-        text=spec["heading"],
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["heading"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-        bold=True,
+        slide, brand, geom["margin"], geom["heading_top"],
+        geom["content_w"], geom["heading_h"],
+        as_text(spec.get("heading")),
+        "header", sizes["heading"], colour(brand, "ink"),
+        bold=True, is_header=True,
     )
 
-    cols = layout["columns"]
-    slide_w = brand["slide_dimensions_in"]["width"]
-    margin = layout["margin_in"]
-    total_w = slide_w - margin["left"] - margin["right"]
-    gap = cols["gap"]
-    pillar_w = (total_w - gap * (count - 1)) / count
+    pillars = coerce_count(spec.get("pillars"), count, count, _empty_pillar)
 
-    pillar_heading_size = brand["sizes_pt"]["pillar_heading"]
-    body_size = brand["sizes_pt"]["body"] if count == 3 else 14
+    top = geom["content_top"]
+    height = geom["content_bottom"] - top
+    gap = max(geom["gap"], 0.25)
+    left = geom["body_left"]
+    col_w = (geom["body_w"] - gap * (count - 1)) / count
+
+    icon = round(col_w * 0.16, 3)
+    accent = colour(brand, "accent")
+    body_size = sizes["body"] if count == 3 else max(11, sizes["body"] - 3)
 
     for i, pillar in enumerate(pillars):
-        x = margin["left"] + i * (pillar_w + gap)
+        if not isinstance(pillar, dict):
+            pillar = _empty_pillar()
+        x = left + i * (col_w + gap)
 
-        icon_size = cols["icon_h"]
-        add_filled_rect(
-            slide, x, cols["top"], icon_size, icon_size,
-            fill_hex=brand["accents"][accent],
-        )
+        add_filled_rect(slide, x, top, icon, icon, accent)
         add_text_box(
-            slide, x, cols["top"], icon_size, icon_size,
-            text=str(pillar.get("icon_glyph", "")),
-            font_family=brand["fonts"]["header"],
-            size_pt=int(icon_size * 36),
-            colour_hex=resolve_colour(brand, accent, "inverse"),
+            slide, brand, x, top, icon, icon,
+            as_text(pillar.get("icon_glyph")),
+            "header", max(10, int(icon * 34)), readable_on(brand, accent),
+            bold=True, align="center", anchor="middle",
+        )
+        head_top = top + icon + 0.15
+        add_text_box(
+            slide, brand, x, head_top, col_w, 0.7,
+            as_text(pillar.get("heading")),
+            "header", sizes["pillar_heading"], colour(brand, "ink"),
+            bold=True, is_header=True,
+        )
+        body_top = head_top + 0.8
+        add_multiline(
+            slide, brand, x, body_top, col_w,
+            top + height - body_top,
+            [as_text(pillar.get("body"))],
+            "body", body_size, colour(brand, "ink"),
+        )
+
+# === layouts/quadrant_grid.py ===
+"""grid family / quadrant_grid variant: heading + 2x2 grid of numbered cells.
+
+VARIANT_ELEMENT_COUNTS: exactly 4 cells -- padded/truncated, never raised.
+"""
+
+def _empty_cell():
+    return {"number": "", "label": "", "body": ""}
+
+
+def _render_quadrant_grid(slide, spec, brand, geom):
+    sizes = brand["sizes_pt"]
+    add_text_box(
+        slide, brand, geom["margin"], geom["heading_top"],
+        geom["content_w"], geom["heading_h"],
+        as_text(spec.get("heading")),
+        "header", sizes["heading"], colour(brand, "ink"),
+        bold=True, is_header=True,
+    )
+
+    cells = coerce_count(spec.get("cells"), 4, 4, _empty_cell)
+
+    top = geom["content_top"]
+    height = geom["content_bottom"] - top
+    gap = max(geom["gap"], 0.25)
+    left = geom["body_left"]
+    cw = (geom["body_w"] - gap) / 2.0
+    ch = (height - gap) / 2.0
+
+    positions = [
+        (left, top), (left + cw + gap, top),
+        (left, top + ch + gap), (left + cw + gap, top + ch + gap),
+    ]
+    border = colour(brand, "accent")
+
+    for (x, y), cell in zip(positions, cells):
+        if not isinstance(cell, dict):
+            cell = _empty_cell()
+        add_rounded_rect(slide, x, y, cw, ch, colour(brand, "surface"),
+                         line_hex=border)
+        add_text_box(
+            slide, brand, x + 0.2, y + 0.12, 1.1, 1.0,
+            as_text(cell.get("number")),
+            "header", max(20, sizes["heading"] + 8), colour(brand, "accent"),
             bold=True,
-            align="center", anchor="middle",
         )
-
-        head_top = cols["top"] + icon_size + 0.15
         add_text_box(
-            slide, x, head_top, pillar_w, cols["heading_h"],
-            text=pillar["heading"],
-            font_family=brand["fonts"]["header"],
-            size_pt=pillar_heading_size,
-            colour_hex=resolve_colour(brand, accent, "text_primary"),
-            bold=True,
+            slide, brand, x + 1.3, y + 0.25, cw - 1.5, 0.6,
+            as_text(cell.get("label")),
+            "header", sizes["pillar_heading"], colour(brand, "ink"),
+            bold=True, is_header=True,
         )
-
-        body_top = head_top + cols["heading_h"] + 0.1
-        add_text_box(
-            slide, x, body_top, pillar_w, cols["body_h"],
-            text=pillar["body"],
-            font_family=brand["fonts"]["body"],
-            size_pt=body_size,
-            colour_hex=resolve_colour(brand, accent, "text_primary"),
+        add_multiline(
+            slide, brand, x + 0.3, y + 1.0, cw - 0.6, ch - 1.2,
+            [as_text(cell.get("body"))],
+            "body", sizes["body"], colour(brand, "ink"),
         )
 
 # === layouts/process_flow.py ===
-"""process_flow layout: heading + 4-6 rounded-rectangle steps in a row."""
+"""flow family / process_flow variant: heading + 4-6 step boxes in a row.
 
-from pptx.util import Pt
+VARIANT_ELEMENT_COUNTS: 4-6 steps. Fewer/more -> padded/truncated, never raised.
+"""
+
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+from pptx.util import Pt
+
+def _empty_step():
+    return {"number": "", "label": "", "detail": ""}
 
 
-
-def _render_process_flow(slide, spec, brand, accent):
-    layout = PALETTE["process_flow"]
-    steps = spec["steps"]
-    n = len(steps)
-    if not (layout["chain"]["min"] <= n <= layout["chain"]["max"]):
-        raise ValueError(
-            f"process_flow needs {layout['chain']['min']}-{layout['chain']['max']} steps, got {n}"
-        )
-
-    h = layout["heading_box"]
+def _render_process_flow(slide, spec, brand, geom):
+    sizes = brand["sizes_pt"]
     add_text_box(
-        slide,
-        h["left"], h["top"], h["width"], h["height"],
-        text=spec["heading"],
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["heading"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-        bold=True,
+        slide, brand, geom["margin"], geom["heading_top"],
+        geom["content_w"], geom["heading_h"],
+        as_text(spec.get("heading")),
+        "header", sizes["heading"], colour(brand, "ink"),
+        bold=True, is_header=True,
     )
 
-    margin = layout["margin_in"]
-    slide_w = brand["slide_dimensions_in"]["width"]
-    total_w = slide_w - margin["left"] - margin["right"]
-    gap = layout["chain"]["gap"]
-    box_w = (total_w - gap * (n - 1)) / n
-    top = layout["chain"]["top"]
-    h_box = layout["chain"]["height"]
+    steps = coerce_count(spec.get("steps"), 4, 6, _empty_step)
+    n = len(steps)
+
+    top = geom["content_top"]
+    gap = max(geom["gap"], 0.2)
+    left = geom["body_left"]
+    box_w = (geom["body_w"] - gap * (n - 1)) / n
+    box_h = 1.9
+    accent = colour(brand, "accent")
+    on_accent = readable_on(brand, accent)
 
     for i, step in enumerate(steps):
-        x = margin["left"] + i * (box_w + gap)
-        rect = add_rounded_rect(slide, x, top, box_w, h_box,
-                                fill_hex=brand["accents"][accent])
+        if not isinstance(step, dict):
+            step = _empty_step()
+        x = left + i * (box_w + gap)
+        rect = add_rounded_rect(slide, x, top, box_w, box_h, accent)
         tf = rect.text_frame
         tf.word_wrap = True
         tf.vertical_anchor = MSO_ANCHOR.MIDDLE
         p = tf.paragraphs[0]
-        p.text = step["label"]
+        p.text = apply_header_case(brand, as_text(step.get("label")))
         p.alignment = PP_ALIGN.CENTER
         if p.runs:
-            r = p.runs[0]
-            r.font.name = brand["fonts"]["header"]
-            r.font.size = Pt(brand["sizes_pt"]["pillar_heading"])
-            r.font.bold = True
-            r.font.color.rgb = hex_to_rgb(brand["text"]["inverse"])
+            run = p.runs[0]
+            run.font.name = brand["fonts"]["header"]
+            run.font.size = Pt(sizes["pillar_heading"])
+            run.font.bold = True
+            run.font.color.rgb = hex_to_rgb(on_accent)
 
         add_text_box(
-            slide, x, layout["detail_top"], box_w, 1.5,
-            text=step.get("detail", ""),
-            font_family=brand["fonts"]["body"],
-            size_pt=14,
-            colour_hex=resolve_colour(brand, accent, "text_secondary"),
-            align="center", anchor="top",
+            slide, brand, x, top + box_h + 0.2, box_w,
+            geom["content_bottom"] - top - box_h - 0.2,
+            as_text(step.get("detail")),
+            "body", max(11, sizes["body"] - 3), colour(brand, "muted"),
+            align="center",
         )
-
-# === layouts/compare_contrast.py ===
-"""compare_contrast layout: heading + two parallel labelled bullet columns."""
-
-
-
-
-def _bullet_lines(points):
-    return "\n".join(f"• {p}" for p in points)
-
-
-def _render_compare_contrast(slide, spec, brand, accent):
-    layout = PALETTE["compare_contrast"]
-
-    h = layout["heading_box"]
-    add_text_box(
-        slide,
-        h["left"], h["top"], h["width"], h["height"],
-        text=spec["heading"],
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["heading"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-        bold=True,
-    )
-
-    for side in ("left", "right"):
-        label_box = layout[f"{side}_label"]
-        body_box = layout[f"{side}_body"]
-        add_text_box(
-            slide,
-            label_box["left"], label_box["top"], label_box["width"], label_box["height"],
-            text=spec[f"{side}_label"],
-            font_family=brand["fonts"]["header"],
-            size_pt=brand["sizes_pt"]["pillar_heading"],
-            colour_hex=resolve_colour(brand, accent, "accent"),
-            bold=True,
-        )
-        add_text_box(
-            slide,
-            body_box["left"], body_box["top"], body_box["width"], body_box["height"],
-            text=_bullet_lines(spec[f"{side}_points"]),
-            font_family=brand["fonts"]["body"],
-            size_pt=brand["sizes_pt"]["body"],
-            colour_hex=resolve_colour(brand, accent, "text_primary"),
-        )
-
-# === layouts/stat_callout.py ===
-"""stat_callout layout: hero number with unit + context line."""
-
-
-
-
-def _render_stat_callout(slide, spec, brand, accent):
-    layout = PALETTE["stat_callout"]
-
-    s = layout["stat_box"]
-    add_text_box(
-        slide,
-        s["left"], s["top"], s["width"], s["height"],
-        text=f"{spec['stat']}{spec.get('unit', '')}",
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["stat"],
-        colour_hex=resolve_colour(brand, accent, "accent"),
-        align="center", anchor="middle",
-        bold=True,
-    )
-
-    c = layout["context_box"]
-    add_text_box(
-        slide,
-        c["left"], c["top"], c["width"], c["height"],
-        text=spec["context"],
-        font_family=brand["fonts"]["body"],
-        size_pt=brand["sizes_pt"]["heading"],
-        colour_hex=resolve_colour(brand, accent, "text_secondary"),
-        align="center",
-    )
-
-# === layouts/quote.py ===
-"""quote layout: oversized opening quote mark + quote body + attribution."""
-
-
-
-
-def _render_quote(slide, spec, brand, accent):
-    layout = PALETTE["quote"]
-
-    m = layout["mark_box"]
-    add_text_box(
-        slide,
-        m["left"], m["top"], m["width"], m["height"],
-        text="“",
-        font_family=brand["fonts"]["header"],
-        size_pt=180,
-        colour_hex=resolve_colour(brand, accent, "accent"),
-        bold=True,
-    )
-
-    q = layout["quote_box"]
-    add_text_box(
-        slide,
-        q["left"], q["top"], q["width"], q["height"],
-        text=spec["quote"],
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["heading"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-    )
-
-    a = layout["attribution_box"]
-    add_text_box(
-        slide,
-        a["left"], a["top"], a["width"], a["height"],
-        text=f"— {spec['attribution']}",
-        font_family=brand["fonts"]["body"],
-        size_pt=brand["sizes_pt"]["body"],
-        colour_hex=resolve_colour(brand, accent, "text_secondary"),
-    )
 
 # === layouts/chart.py ===
-"""chart layout: heading + native PowerPoint chart (BAR/LINE/COLUMN) + caption."""
+"""data family / chart variant: heading + native PPTX chart + caption."""
 
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE
 from pptx.util import Inches
-
 
 
 
 _CHART_TYPE_MAP = {
-    "bar":    XL_CHART_TYPE.BAR_CLUSTERED,
+    "bar": XL_CHART_TYPE.BAR_CLUSTERED,
     "column": XL_CHART_TYPE.COLUMN_CLUSTERED,
-    "line":   XL_CHART_TYPE.LINE,
+    "line": XL_CHART_TYPE.LINE,
 }
 
 
-def _render_chart(slide, spec, brand, accent):
-    layout = PALETTE["chart"]
-
-    h = layout["heading_box"]
+def _render_chart(slide, spec, brand, geom):
+    sizes = brand["sizes_pt"]
     add_text_box(
-        slide,
-        h["left"], h["top"], h["width"], h["height"],
-        text=spec["heading"],
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["heading"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-        bold=True,
+        slide, brand, geom["margin"], geom["heading_top"],
+        geom["content_w"], geom["heading_h"],
+        as_text(spec.get("heading")),
+        "header", sizes["heading"], colour(brand, "ink"),
+        bold=True, is_header=True,
     )
 
-    chart_box = layout["chart_box"]
-    chart_type = _CHART_TYPE_MAP.get(spec.get("chart_type", "bar"), XL_CHART_TYPE.BAR_CLUSTERED)
-    data = spec["chart_data"]
+    top = geom["content_top"]
+    height = geom["content_bottom"] - top - 0.5
+    chart_type = _CHART_TYPE_MAP.get(
+        spec.get("chart_type", "bar"), XL_CHART_TYPE.BAR_CLUSTERED
+    )
+
+    data = spec.get("chart_data")
+    if not isinstance(data, dict):
+        data = {}
+    categories = data.get("categories")
+    if not isinstance(categories, list) or not categories:
+        categories = ["A", "B"]
+    series = data.get("series")
+    if not isinstance(series, list) or not series:
+        series = [{"name": "Series 1", "values": [1] * len(categories)}]
+
     chart_data = CategoryChartData()
-    chart_data.categories = data["categories"]
-    for series in data["series"]:
-        chart_data.add_series(series["name"], series["values"])
+    chart_data.categories = [as_text(c) for c in categories]
+    for s in series:
+        if not isinstance(s, dict):
+            continue
+        values = s.get("values")
+        if not isinstance(values, list):
+            values = [0] * len(categories)
+        # Pad/truncate values to category count.
+        values = (values + [0] * len(categories))[:len(categories)]
+        nums = []
+        for v in values:
+            try:
+                nums.append(float(v))
+            except (TypeError, ValueError):
+                nums.append(0.0)
+        chart_data.add_series(as_text(s.get("name"), "Series"), nums)
+
     slide.shapes.add_chart(
         chart_type,
-        Inches(chart_box["left"]), Inches(chart_box["top"]),
-        Inches(chart_box["width"]), Inches(chart_box["height"]),
+        Inches(geom["body_left"]), Inches(top),
+        Inches(geom["body_w"]), Inches(height),
         chart_data,
     )
-
-    c = layout["caption_box"]
     add_text_box(
-        slide,
-        c["left"], c["top"], c["width"], c["height"],
-        text=spec.get("caption", ""),
-        font_family=brand["fonts"]["body"],
-        size_pt=brand["sizes_pt"]["footer"],
-        colour_hex=resolve_colour(brand, accent, "text_secondary"),
-    )
-
-# === layouts/recap.py ===
-"""recap layout: bulleted takeaways + next-step pointer + signoff line."""
-
-
-
-
-def _render_recap(slide, spec, brand, accent):
-    layout = PALETTE["recap"]
-
-    h = layout["heading_box"]
-    add_text_box(
-        slide,
-        h["left"], h["top"], h["width"], h["height"],
-        text="Takeaways",
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["heading"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-        bold=True,
-    )
-
-    t = layout["takeaways_box"]
-    bullets = "\n".join(f"• {item}" for item in spec["takeaways"])
-    add_text_box(
-        slide,
-        t["left"], t["top"], t["width"], t["height"],
-        text=bullets,
-        font_family=brand["fonts"]["body"],
-        size_pt=brand["sizes_pt"]["body"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-    )
-
-    n = layout["next_step_box"]
-    add_text_box(
-        slide,
-        n["left"], n["top"], n["width"], 0.5,
-        text="Next step",
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["pillar_heading"],
-        colour_hex=resolve_colour(brand, accent, "accent"),
-        bold=True,
-    )
-    add_text_box(
-        slide,
-        n["left"], n["top"] + 0.6, n["width"], n["height"] - 0.6,
-        text=spec["next_step"],
-        font_family=brand["fonts"]["body"],
-        size_pt=brand["sizes_pt"]["body"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-    )
-
-    s = layout["signoff_box"]
-    add_text_box(
-        slide,
-        s["left"], s["top"], s["width"], s["height"],
-        text="Teachers Assistant AI",
-        font_family=brand["fonts"]["body"],
-        size_pt=brand["sizes_pt"]["footer"],
-        colour_hex=resolve_colour(brand, accent, "text_secondary"),
-        align="right",
+        slide, brand, geom["body_left"], top + height + 0.05,
+        geom["body_w"], 0.5,
+        as_text(spec.get("caption")),
+        "body", sizes["caption"], colour(brand, "muted"),
     )
 
 # === layouts/data_table.py ===
-"""data_table layout: heading + native PowerPoint table.
+"""data family / data_table variant: heading + native PPTX table.
 
-Limits: 5 rows x 4 cols (validated). Header row tinted with accent;
-emphasis cells get a soft accent fill.
+Limits: <=5 rows x <=4 cols. Header row tinted with accent; emphasis cells
+get a surface fill. Over-limit input is truncated, never raised.
 """
 
 from pptx.util import Inches, Pt
 
+_MAX_ROWS = 5
+_MAX_COLS = 4
 
 
-
-def _render_data_table(slide, spec, brand, accent):
-    layout = PALETTE["data_table"]
-    columns = spec["columns"]
-    rows = spec["rows"]
-    if len(rows) > layout["max_rows"]:
-        raise ValueError(f"data_table: {len(rows)} rows exceeds max {layout['max_rows']}")
-    if len(columns) > layout["max_cols"]:
-        raise ValueError(f"data_table: {len(columns)} columns exceeds max {layout['max_cols']}")
-
-    h = layout["heading_box"]
+def _render_data_table(slide, spec, brand, geom):
+    sizes = brand["sizes_pt"]
     add_text_box(
-        slide,
-        h["left"], h["top"], h["width"], h["height"],
-        text=spec["heading"],
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["heading"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-        bold=True,
+        slide, brand, geom["margin"], geom["heading_top"],
+        geom["content_w"], geom["heading_h"],
+        as_text(spec.get("heading")),
+        "header", sizes["heading"], colour(brand, "ink"),
+        bold=True, is_header=True,
     )
 
-    tb = layout["table_box"]
-    table_shape = slide.shapes.add_table(
-        rows=len(rows) + 1, cols=len(columns),
-        left=Inches(tb["left"]), top=Inches(tb["top"]),
-        width=Inches(tb["width"]), height=Inches(tb["height"]),
-    )
-    table = table_shape.table
+    columns = spec.get("columns")
+    if not isinstance(columns, list) or not columns:
+        columns = ["Column"]
+    columns = [as_text(c) for c in columns[:_MAX_COLS]]
+    n_cols = len(columns)
 
-    accent_hex = brand["accents"][accent]
-    inverse_hex = brand["text"]["inverse"]
-    text_primary_hex = brand["text"]["primary"]
+    rows = spec.get("rows")
+    if not isinstance(rows, list):
+        rows = []
+    rows = rows[:_MAX_ROWS]
+    norm_rows = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)):
+            row = [as_text(row)]
+        cells = [as_text(v) for v in row][:n_cols]
+        cells += [""] * (n_cols - len(cells))
+        norm_rows.append(cells)
 
-    for i, col in enumerate(columns):
-        cell = table.cell(0, i)
+    top = geom["content_top"]
+    table = slide.shapes.add_table(
+        rows=len(norm_rows) + 1, cols=n_cols,
+        left=Inches(geom["body_left"]), top=Inches(top),
+        width=Inches(geom["body_w"]),
+        height=Inches(geom["content_bottom"] - top),
+    ).table
+
+    accent = colour(brand, "accent")
+    on_accent = readable_on(brand, accent)
+    ink = colour(brand, "ink")
+    surface = colour(brand, "surface")
+
+    for c, col in enumerate(columns):
+        cell = table.cell(0, c)
         cell.text = col
         cell.fill.solid()
-        cell.fill.fore_color.rgb = hex_to_rgb(accent_hex)
+        cell.fill.fore_color.rgb = hex_to_rgb(accent)
         for para in cell.text_frame.paragraphs:
             for run in para.runs:
                 run.font.name = brand["fonts"]["header"]
-                run.font.size = Pt(14)
+                run.font.size = Pt(sizes["caption"] + 3)
                 run.font.bold = True
-                run.font.color.rgb = hex_to_rgb(inverse_hex)
+                run.font.color.rgb = hex_to_rgb(on_accent)
 
-    emphasis = {tuple(c) for c in spec.get("emphasis_cells", [])}
-    for r_idx, row in enumerate(rows):
-        for c_idx, value in enumerate(row):
-            cell = table.cell(r_idx + 1, c_idx)
-            cell.text = str(value)
-            if (r_idx, c_idx) in emphasis:
+    emphasis = set()
+    for pair in spec.get("emphasis_cells", []) or []:
+        if isinstance(pair, (list, tuple)) and len(pair) == 2:
+            emphasis.add((pair[0], pair[1]))
+
+    for r, row in enumerate(norm_rows):
+        for c, value in enumerate(row):
+            cell = table.cell(r + 1, c)
+            cell.text = value
+            if (r, c) in emphasis:
                 cell.fill.solid()
-                cell.fill.fore_color.rgb = hex_to_rgb(brand["text"]["inverse"])
+                cell.fill.fore_color.rgb = hex_to_rgb(surface)
             for para in cell.text_frame.paragraphs:
                 for run in para.runs:
                     run.font.name = brand["fonts"]["body"]
-                    run.font.size = Pt(12)
-                    run.font.color.rgb = hex_to_rgb(text_primary_hex)
+                    run.font.size = Pt(sizes["caption"] + 1)
+                    run.font.color.rgb = hex_to_rgb(ink)
 
 # === layouts/stat_doughnut.py ===
-"""stat_doughnut layout: heading + 3 side-by-side doughnut charts."""
+"""data family / stat_doughnut variant: heading + 3 side-by-side doughnuts.
+
+VARIANT_ELEMENT_COUNTS: exactly 3 doughnuts -- padded/truncated, never raised.
+"""
 
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE
@@ -939,183 +1194,128 @@ from pptx.util import Inches
 
 
 
+def _empty_doughnut():
+    return {"label": "", "percent": 0, "accent_role": "neutral"}
 
-def _render_stat_doughnut(slide, spec, brand, accent):
-    layout = PALETTE["stat_doughnut"]
 
-    h = layout["heading_box"]
+def _pct(value):
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(100.0, n))
+
+
+def _render_stat_doughnut(slide, spec, brand, geom):
+    sizes = brand["sizes_pt"]
     add_text_box(
-        slide,
-        h["left"], h["top"], h["width"], h["height"],
-        text=spec["heading"],
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["heading"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-        bold=True,
+        slide, brand, geom["margin"], geom["heading_top"],
+        geom["content_w"], geom["heading_h"],
+        as_text(spec.get("heading")),
+        "header", sizes["heading"], colour(brand, "ink"),
+        bold=True, is_header=True,
     )
 
-    margin = layout["margin_in"]
-    slide_w = brand["slide_dimensions_in"]["width"]
-    total_w = slide_w - margin["left"] - margin["right"]
-    n = layout["doughnut_count"]
-    size = layout["doughnut_size"]
-    gap = (total_w - size * n) / (n - 1) if n > 1 else 0
+    doughnuts = coerce_count(spec.get("doughnuts"), 3, 3, _empty_doughnut)
+    n = 3
+    top = geom["content_top"]
+    left = geom["body_left"]
+    size = min(3.2, (geom["body_w"] - 0.6) / n)
+    gap = (geom["body_w"] - size * n) / (n - 1) if n > 1 else 0
 
-    doughnuts = spec["doughnuts"]
-    if len(doughnuts) != n:
-        raise ValueError(f"stat_doughnut needs {n} entries, got {len(doughnuts)}")
+    # accent_role -> palette role (warning/critical map to accent_2).
+    role_map = {
+        "positive": "accent", "neutral": "accent",
+        "warning": "accent_2", "critical": "accent_2",
+    }
 
     for i, d in enumerate(doughnuts):
-        x = margin["left"] + i * (size + gap)
-        y = layout["doughnut_top"]
+        if not isinstance(d, dict):
+            d = _empty_doughnut()
+        x = left + i * (size + gap)
+        pct = _pct(d.get("percent"))
 
         chart_data = CategoryChartData()
-        chart_data.categories = [d["label"], "rest"]
-        chart_data.add_series("share", [d["percent"], 100 - d["percent"]])
+        chart_data.categories = [as_text(d.get("label"), "share"), "rest"]
+        chart_data.add_series("share", [pct, 100 - pct])
         slide.shapes.add_chart(
             XL_CHART_TYPE.DOUGHNUT,
-            Inches(x), Inches(y), Inches(size), Inches(size),
+            Inches(x), Inches(top), Inches(size), Inches(size),
             chart_data,
         )
-
-        role = d.get("accent_role", "info")
-        colour_hex = (
-            resolve_severity_colour(brand, role)
-            if role != "neutral"
-            else resolve_colour(brand, accent, "accent")
+        role = role_map.get(d.get("accent_role", "neutral"), "accent")
+        add_text_box(
+            slide, brand, x, top + size + 0.05, size, 0.55,
+            "%d%%" % int(round(pct)),
+            "header", sizes["pillar_heading"] + 6, colour(brand, role),
+            bold=True, align="center",
         )
         add_text_box(
-            slide, x, y + size + 0.05, size, 0.5,
-            text=f"{d['percent']}%",
-            font_family=brand["fonts"]["header"],
-            size_pt=28,
-            colour_hex=colour_hex,
-            bold=True,
+            slide, brand, x, top + size + 0.65, size, 0.7,
+            as_text(d.get("label")),
+            "body", sizes["body"], colour(brand, "ink"),
             align="center",
-        )
-
-        add_text_box(
-            slide, x, layout["label_top"], size, 0.6,
-            text=d["label"],
-            font_family=brand["fonts"]["body"],
-            size_pt=brand["sizes_pt"]["body"],
-            colour_hex=resolve_colour(brand, accent, "text_primary"),
-            align="center",
-        )
-
-# === layouts/quadrant_grid.py ===
-"""quadrant_grid layout: heading + 2x2 grid of numbered cells."""
-
-
-
-def _render_quadrant_grid(slide, spec, brand, accent):
-    layout = PALETTE["quadrant_grid"]
-    cells = spec["cells"]
-    if len(cells) != 4:
-        raise ValueError(f"quadrant_grid needs 4 cells, got {len(cells)}")
-
-    h = layout["heading_box"]
-    add_text_box(
-        slide,
-        h["left"], h["top"], h["width"], h["height"],
-        text=spec["heading"],
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["heading"],
-        colour_hex=resolve_colour(brand, accent, "text_primary"),
-        bold=True,
-    )
-
-    cw = layout["cell_width"]
-    ch = layout["cell_height"]
-    gap = layout["cell_gap"]
-    gl = layout["grid_left"]
-    gt = layout["grid_top"]
-
-    positions = [
-        (gl,           gt),
-        (gl + cw + gap, gt),
-        (gl,           gt + ch + gap),
-        (gl + cw + gap, gt + ch + gap),
-    ]
-
-    cell_fill_hex = brand["text"]["inverse"]
-    border_hex    = brand["accents"][accent]
-
-    for (x, y), cell in zip(positions, cells):
-        rect = add_rounded_rect(slide, x, y, cw, ch, fill_hex=cell_fill_hex, line=True)
-        rect.line.color.rgb = hex_to_rgb(border_hex)
-
-        add_text_box(
-            slide, x + 0.15, y + 0.1, 1.0, 1.0,
-            text=str(cell["number"]),
-            font_family=brand["fonts"]["header"],
-            size_pt=48,
-            colour_hex=resolve_colour(brand, accent, "accent"),
-            bold=True,
-        )
-
-        add_text_box(
-            slide, x + 1.2, y + 0.3, cw - 1.4, 0.6,
-            text=cell["label"],
-            font_family=brand["fonts"]["header"],
-            size_pt=brand["sizes_pt"]["pillar_heading"],
-            colour_hex=resolve_colour(brand, accent, "text_primary"),
-            bold=True,
-        )
-
-        add_text_box(
-            slide, x + 0.3, y + 1.1, cw - 0.6, ch - 1.2,
-            text=cell["body"],
-            font_family=brand["fonts"]["body"],
-            size_pt=brand["sizes_pt"]["body"],
-            colour_hex=resolve_colour(brand, accent, "text_primary"),
         )
 
 # === layouts/callout_box.py ===
-"""callout_box layout: severity-keyed tinted container with heading + body."""
+"""callout family / callout_box variant: severity-keyed tinted container.
+
+severity is one of info | positive | warning | critical. It maps onto the
+generative palette (not a fixed brand palette): info -> muted, positive ->
+accent, warning/critical -> accent_2.
+"""
+
+_SEVERITY_ROLE = {
+    "info": "muted",
+    "positive": "accent",
+    "warning": "accent_2",
+    "critical": "accent_2",
+}
 
 
-
-def _render_callout_box(slide, spec, brand, accent):
-    layout = PALETTE["callout_box"]
+def _render_callout_box(slide, spec, brand, geom):
+    sizes = brand["sizes_pt"]
     severity = spec.get("severity", "info")
-    severity_hex = resolve_severity_colour(brand, severity)
+    fill = colour(brand, _SEVERITY_ROLE.get(severity, "muted"))
+    text_hex = readable_on(brand, fill)
 
-    c = layout["container"]
-    add_filled_rect(slide, c["left"], c["top"], c["width"], c["height"],
-                    fill_hex=severity_hex)
+    # Container inset from the body region.
+    inset = 0.4
+    left = geom["body_left"] + inset
+    top = geom["content_top"]
+    width = geom["body_w"] - 2 * inset
+    height = geom["content_bottom"] - top - 0.3
 
-    text_colour = resolve_colour(brand, accent, "inverse") if severity in (
-        "critical", "positive", "warning"
-    ) else resolve_colour(brand, accent, "text_primary")
+    add_rounded_rect(slide, left, top, width, height, fill)
 
-    h = layout["heading_box"]
+    pad = 0.45
     add_text_box(
-        slide,
-        h["left"], h["top"], h["width"], h["height"],
-        text=spec["heading"],
-        font_family=brand["fonts"]["header"],
-        size_pt=brand["sizes_pt"]["heading"],
-        colour_hex=text_colour,
-        bold=True,
+        slide, brand, left + pad, top + pad, width - 2 * pad, 0.9,
+        as_text(spec.get("heading")),
+        "header", sizes["heading"], text_hex,
+        bold=True, is_header=True,
     )
-
-    b = layout["body_box"]
     add_text_box(
-        slide,
-        b["left"], b["top"], b["width"], b["height"],
-        text=spec["body"],
-        font_family=brand["fonts"]["body"],
-        size_pt=brand["sizes_pt"]["body"],
-        colour_hex=text_colour,
+        slide, brand, left + pad, top + pad + 1.0,
+        width - 2 * pad, height - pad - 1.3,
+        as_text(spec.get("body")),
+        "body", sizes["body"], text_hex,
     )
 
 # === renderer.py ===
-"""render_deck — entry point.
+"""render_deck -- token-driven entry point.
 
-Takes a deck spec (Director-produced + per-slide content from Section
-branches) and returns a pptx.Presentation object. Caller is responsible
-for saving it.
+Signature: render_deck(deck_spec, design_tokens) -> pptx.Presentation.
+
+  * `deck_spec`  -- {deck_title, footer_text, narrative_arc, sections, slides}.
+    Each slide carries layout_family, variant, position, branch_index,
+    accent_role, presenter_notes, optional per-slide `composition` override,
+    plus the variant content fields (VARIANT_CONTENT in schema.py).
+  * `design_tokens` -- the generative visual system (DESIGN_TOKEN_SCHEMA).
+
+Dispatch is on `variant`. An unknown variant renders the safe
+`single_statement` fallback rather than crashing. The renderer returns the
+Presentation object; the caller saves it.
 """
 
 from pptx import Presentation
@@ -1123,68 +1323,107 @@ from pptx.util import Inches
 
 
 
+
+# variant -> layout render function. 16 variants across 7 families.
 _RENDERERS = {
-    "title":            _render_title,
-    "section_divider":  _render_section_divider,
+    "title": _render_title,
+    "section_divider": _render_section_divider,
     "single_statement": _render_single_statement,
-    "two_up":           _render_two_up,
-    "pillars_3":        _render_pillars,
-    "pillars_4":        _render_pillars,
-    "process_flow":     _render_process_flow,
+    "recap": _render_recap,
+    "stat_callout": _render_stat_callout,
+    "quote": _render_quote,
+    "two_up": _render_two_up,
     "compare_contrast": _render_compare_contrast,
-    "stat_callout":     _render_stat_callout,
-    "quote":            _render_quote,
-    "chart":            _render_chart,
-    "recap":            _render_recap,
-    "data_table":       _render_data_table,
-    "stat_doughnut":    _render_stat_doughnut,
-    "quadrant_grid":    _render_quadrant_grid,
-    "callout_box":      _render_callout_box,
+    "pillars_3": _render_pillars,
+    "pillars_4": _render_pillars,
+    "quadrant_grid": _render_quadrant_grid,
+    "process_flow": _render_process_flow,
+    "chart": _render_chart,
+    "data_table": _render_data_table,
+    "stat_doughnut": _render_stat_doughnut,
+    "callout_box": _render_callout_box,
 }
 
-
-def _add_dark_background(slide, brand):
-    add_filled_rect(slide, 0, 0,
-                    brand["slide_dimensions_in"]["width"],
-                    brand["slide_dimensions_in"]["height"],
-                    fill_hex=brand["primary"])
+# Variants that should NOT receive a footer (full-bleed display slides).
+_NO_FOOTER = {"title", "section_divider"}
+# Variants that should NOT receive the motif (full-bleed display slides).
+_NO_MOTIF = {"title", "section_divider"}
 
 
-def render_deck(spec, theme="light", accent="mint", brand=None):
-    """Render a deck.
+def _slide_brand(design_tokens, base_brand, slide_spec):
+    """Resolve the brand for a slide, applying any per-slide composition override.
 
-    Args:
-        spec: dict with keys deck_title, footer_text, sections, slides.
-        theme: "light" or "dark".
-        accent: one of brand.accents keys.
-        brand: optional BRAND override (mostly for tests).
-    Returns:
-        pptx.Presentation object.
+    An override carries raw token values (e.g. margin="wide"), so it is merged
+    at the token level and re-resolved -- never injected into a resolved brand.
     """
-    brand = brand or BRAND
-    if accent not in brand["accents"]:
-        raise ValueError(f"Unknown accent: {accent!r}")
-    if theme not in ("light", "dark"):
-        raise ValueError(f"Unknown theme: {theme!r}")
+    override = slide_spec.get("composition")
+    if not isinstance(override, dict) or not override:
+        return base_brand
+    tokens = design_tokens if isinstance(design_tokens, dict) else {}
+    merged = dict(tokens)
+    comp = dict(tokens.get("composition", {}) or {})
+    for key in ("alignment", "density", "margin", "whitespace"):
+        if key in override:
+            comp[key] = override[key]
+    merged["composition"] = comp
+    return resolve_brand(merged)
+
+
+def _draw_footer(slide, brand, geom, footer_text, position):
+    if not footer_text:
+        return
+    n = coerce_int(position, 0)
+    text = "%s    |    %d" % (as_text(footer_text), n) if n else as_text(footer_text)
+    add_text_box(
+        slide, brand, geom["margin"], geom["slide_h"] - 0.45,
+        geom["content_w"], 0.35,
+        text, "body", brand["sizes_pt"]["caption"],
+        colour(brand, "muted"), align="right",
+    )
+
+
+def render_deck(deck_spec, design_tokens):
+    """Render a deck from a deck_spec + design_tokens. Returns a Presentation."""
+    deck_spec = deck_spec if isinstance(deck_spec, dict) else {}
+    brand = resolve_brand(design_tokens)
 
     prs = Presentation()
-    prs.slide_width  = Inches(brand["slide_dimensions_in"]["width"])
-    prs.slide_height = Inches(brand["slide_dimensions_in"]["height"])
-
-    slides = sorted(spec["slides"], key=lambda s: s["position"])
+    dims = brand["slide_dimensions_in"]
+    prs.slide_width = Inches(dims["width"])
+    prs.slide_height = Inches(dims["height"])
     blank = prs.slide_layouts[6]
 
-    for slide_spec in slides:
-        slide = prs.slides.add_slide(blank)
-        if theme == "dark":
-            _add_dark_background(slide, brand)
-        layout_id = slide_spec["layout"]
-        renderer = _RENDERERS.get(layout_id)
-        if renderer is None:
-            raise ValueError(f"Unknown layout: {layout_id!r}")
-        renderer(slide, slide_spec, brand=brand, accent=accent)
+    slides = deck_spec.get("slides")
+    if not isinstance(slides, list):
+        slides = []
+    slides = sorted(slides, key=lambda s: coerce_int(s.get("position"), 0))
+    footer_text = as_text(deck_spec.get("footer_text"))
 
-        notes = slide_spec.get("presenter_notes", "")
+    for slide_spec in slides:
+        if not isinstance(slide_spec, dict):
+            continue
+        slide = prs.slides.add_slide(blank)
+        slide_brand = _slide_brand(design_tokens, brand, slide_spec)
+        geom = compute_geometry(slide_brand)
+
+        fill_background(slide, slide_brand)
+
+        variant = slide_spec.get("variant", "single_statement")
+        if variant not in _NO_MOTIF:
+            draw_motif(slide, slide_brand)
+
+        renderer = _RENDERERS.get(variant, _render_single_statement)
+        try:
+            renderer(slide, slide_spec, slide_brand, geom)
+        except Exception:
+            # Last-ditch guard: never crash a whole deck on one bad slide.
+            _render_single_statement(slide, slide_spec, slide_brand, geom)
+
+        if variant not in _NO_FOOTER:
+            _draw_footer(slide, slide_brand, geom, footer_text,
+                         slide_spec.get("position"))
+
+        notes = as_text(slide_spec.get("presenter_notes"))
         slide.notes_slide.notes_text_frame.text = notes
 
     return prs

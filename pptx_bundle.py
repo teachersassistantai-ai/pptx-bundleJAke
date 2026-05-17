@@ -319,6 +319,39 @@ def apply_header_case(brand, text):
     return text
 
 
+def _fit_font_size(text, width_in, height_in, size_pt, line_spacing=1.15):
+    """Estimate the largest font size (<= size_pt) at which `text` fits a box
+    of width_in x height_in inches.
+
+    python-pptx text boxes do not auto-shrink, so long LLM-written content
+    overflows fixed-height boxes (callout bodies, quadrant cells, headings,
+    long titles). This heuristic -- proportional-font average glyph advance
+    ~0.52em, plus a 1.2 leading fudge -- picks a size that prevents gross
+    overflow. It is deliberately approximate; its job is "never spill off the
+    box", not pixel-perfect typesetting. Floors at 55% of the requested size
+    (or 9pt) so display type still reads big.
+    """
+    text = "" if text is None else str(text)
+    if not text.strip() or width_in <= 0 or height_in <= 0:
+        return size_pt
+    width_pt = width_in * 72.0
+    height_pt = height_in * 72.0
+    paras = text.split("\n")
+    floor = max(9.0, size_pt * 0.55)
+    size = float(size_pt)
+    while size > floor:
+        chars_per_line = max(1, int(width_pt / (0.52 * size)))
+        lines = 0
+        for para in paras:
+            n = len(para)
+            lines += 1 if n == 0 else -(-n // chars_per_line)
+        needed = lines * size * line_spacing * 1.2
+        if needed <= height_pt:
+            return round(size, 1)
+        size -= 1.0
+    return round(floor, 1)
+
+
 def add_text_box(
     slide, brand,
     left_in, top_in, width_in, height_in,
@@ -353,10 +386,11 @@ def add_text_box(
     }.get(align, PP_ALIGN.LEFT)
 
     family = brand["fonts"].get(font_role, brand["fonts"]["body"])
+    fitted = _fit_font_size(rendered, width_in, height_in, size_pt)
     if p.runs:
         run = p.runs[0]
         run.font.name = family
-        run.font.size = Pt(size_pt)
+        run.font.size = Pt(fitted)
         run.font.color.rgb = hex_to_rgb(colour_hex)
         run.font.bold = bold
         # Approximate tracking via character spacing where pptx allows it.
@@ -399,6 +433,9 @@ def add_multiline(
     }.get(align, PP_ALIGN.LEFT)
 
     items = list(lines) if lines else [""]
+    # Fit one size across all paragraphs so the list reads as one block.
+    _joined = "\n".join("" if x is None else str(x) for x in items)
+    fitted = _fit_font_size(_joined, width_in, height_in, size_pt, line_spacing)
     for idx, line in enumerate(items):
         p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
         p.text = "" if line is None else str(line)
@@ -406,7 +443,7 @@ def add_multiline(
         if p.runs:
             run = p.runs[0]
             run.font.name = family
-            run.font.size = Pt(size_pt)
+            run.font.size = Pt(fitted)
             run.font.color.rgb = hex_to_rgb(colour_hex)
         # Real bullet via OOXML: <a:pPr><a:buClr/><a:buChar char="•"/></a:pPr>.
         # The pPr element exists by default; we just add buChar (and optional

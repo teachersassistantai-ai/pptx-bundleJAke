@@ -244,6 +244,28 @@ def colour(brand, role):
     return brand["colours"].get(role, brand["colours"]["ink"])
 
 
+# Semantic accent_role -> palette role mapping. Used everywhere a slide spec
+# carries an `accent_role` field. neutral and positive use the dominant accent;
+# warning and critical escalate to accent_2. This is the single source of truth
+# for "what does accent_role mean visually" -- every layout reads through this.
+_ROLE_TO_PALETTE = {
+    "neutral": "accent",
+    "positive": "accent",
+    "warning": "accent_2",
+    "critical": "accent_2",
+}
+
+
+def accent_for_role(brand, role):
+    """Resolve a slide-level accent_role to a hex string from the brand palette.
+
+    Unknown role -> the dominant accent. This keeps the visual deck-coherent
+    while letting individual slides escalate to accent_2 for warnings/criticals.
+    """
+    palette_role = _ROLE_TO_PALETTE.get(role, "accent")
+    return colour(brand, palette_role)
+
+
 def _relative_luminance(hex_str):
     """WCAG-ish relative luminance for contrast-aware text colour choice."""
     h = (hex_str or "000000").lstrip("#")
@@ -283,7 +305,8 @@ def apply_header_case(brand, text):
         return text[:1].upper() + text[1:] if text else text
     if case == "title":
         # Title-case but keep short connectors lowercase for a designed look.
-        small = {"a", "an", "the", "of", "and", "or", "to", "in", "on", "for", "with"}
+        small = {"a", "an", "the", "of", "and", "or", "to", "in", "on", "at",
+                 "for", "with", "by", "vs", "via", "per", "from", "into", "but"}
         words = text.split()
         out = []
         for idx, w in enumerate(words):
@@ -350,8 +373,18 @@ def add_multiline(
     lines,
     font_role, size_pt, colour_hex,
     align="left", anchor="top", bullet=False,
+    bullet_colour_hex=None, line_spacing=1.15,
 ):
-    """Add a multi-paragraph text box (one paragraph per line)."""
+    """Add a multi-paragraph text box (one paragraph per line).
+
+    bullet=True draws a real round-bullet glyph (U+2022) via OOXML paragraph
+    properties, not "- text". bullet_colour_hex (optional) lets the bullet sit
+    in the accent colour while the line text stays in colour_hex -- a small
+    but high-impact design lift on list slides.
+
+    line_spacing controls inter-paragraph leading. Default 1.15 = comfortable
+    body-text spacing; sparse decks benefit from 1.3+.
+    """
     tb = slide.shapes.add_textbox(
         Inches(left_in), Inches(top_in), Inches(width_in), Inches(height_in)
     )
@@ -368,14 +401,42 @@ def add_multiline(
     items = list(lines) if lines else [""]
     for idx, line in enumerate(items):
         p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
-        text = "" if line is None else str(line)
-        p.text = ("- " + text) if bullet else text
+        p.text = "" if line is None else str(line)
         p.alignment = pp_align
         if p.runs:
             run = p.runs[0]
             run.font.name = family
             run.font.size = Pt(size_pt)
             run.font.color.rgb = hex_to_rgb(colour_hex)
+        # Real bullet via OOXML: <a:pPr><a:buClr/><a:buChar char="•"/></a:pPr>.
+        # The pPr element exists by default; we just add buChar (and optional
+        # buClr) children. Falls back silently if the XML hooks aren't there.
+        if bullet:
+            try:
+                from pptx.oxml.ns import qn
+                pPr = p._pPr if p._pPr is not None else p._p.get_or_add_pPr()
+                # Indent so the bullet sits in negative space.
+                pPr.set("marL", str(int(228600)))  # ~0.25 inch
+                pPr.set("indent", str(int(-228600)))
+                # Bullet colour (optional).
+                if bullet_colour_hex:
+                    buClr = pPr.makeelement(qn("a:buClr"), {})
+                    srgb = pPr.makeelement(qn("a:srgbClr"),
+                                           {"val": bullet_colour_hex.lstrip("#")})
+                    buClr.append(srgb)
+                    pPr.append(buClr)
+                # Bullet glyph.
+                buChar = pPr.makeelement(qn("a:buChar"), {"char": "\u2022"})
+                pPr.append(buChar)
+            except Exception:
+                # If the XML manipulation fails (older pptx), fall back to
+                # a Unicode bullet inline rather than the old ASCII hyphen.
+                p.text = "\u2022  " + (p.text or "")
+        # Line spacing -- paragraph-level setting that python-pptx exposes.
+        try:
+            p.line_spacing = line_spacing
+        except Exception:
+            pass
     return tb
 
 
@@ -423,6 +484,33 @@ def fill_background(slide, brand):
     return rect
 
 
+# --- heading band (shared across content layouts) ---------------------------
+
+def draw_heading(slide, brand, geom, text, accent_role="neutral",
+                 with_rule=True):
+    """Draw a content slide's heading: title text + an accent rule beneath it.
+
+    Replaces the hand-rolled "add_text_box for heading" call that every content
+    layout was duplicating. Centralising it lets us add a designed accent rule
+    consistently and pick the rule colour from accent_role.
+
+    The rule is a thin filled rect just under the heading, accent-coloured,
+    ~1.4 inches long. It gives every content slide a recognisable signature
+    without dominating the composition.
+    """
+    sizes = brand["sizes_pt"]
+    add_text_box(
+        slide, brand, geom["margin"], geom["heading_top"],
+        geom["content_w"], geom["heading_h"],
+        as_text(text), "header", sizes["heading"], colour(brand, "ink"),
+        bold=True, is_header=True,
+    )
+    if with_rule:
+        rule_y = geom["heading_top"] + geom["heading_h"] + 0.02
+        rule_colour = accent_for_role(brand, accent_role)
+        add_filled_rect(slide, geom["margin"], rule_y, 1.4, 0.05, rule_colour)
+
+
 # --- motif ------------------------------------------------------------------
 
 def draw_motif(slide, brand):
@@ -441,15 +529,17 @@ def draw_motif(slide, brand):
     w, h = dims["width"], dims["height"]
 
     if kind == "corner_block":
-        size = round(0.55 * weight, 3)
+        size = round(0.75 * weight, 3)
         add_filled_rect(slide, w - size, 0, size, size, accent)
 
     elif kind == "side_rule":
-        bar = round(0.12 * weight, 3)
+        # Side rule is the most-used motif. Make it actually visible:
+        # 0.18" at light weight, 0.40" at bold.
+        bar = round(0.18 * weight, 3)
         add_filled_rect(slide, 0, 0, bar, h, accent)
 
     elif kind == "dot_grid":
-        dot = round(0.07 * weight, 3)
+        dot = round(0.10 * weight, 3)
         step = 0.42
         y = h - 1.0
         x = w - 1.6
@@ -458,7 +548,7 @@ def draw_motif(slide, brand):
                 add_oval(slide, x + col * step, y + row * step, dot, dot, accent)
 
     elif kind == "baseline_rule":
-        bar = round(0.05 * weight, 3)
+        bar = round(0.08 * weight, 3)
         margin = brand["composition"]["margin"]
         add_filled_rect(slide, margin, h - margin + 0.1,
                         w - 2 * margin, bar, accent)
@@ -522,23 +612,30 @@ def _render_title(slide, spec, brand, geom):
     left = geom["body_left"]
     width = geom["body_w"]
 
+    # Short accent rule above the title -- a "kicker" line that gives the
+    # title block a designed entry point.
+    add_filled_rect(slide, left, 2.05, 0.9, 0.06, colour(brand, "accent"))
+
+    # Title -- vertically centred in a generous block, with line spacing
+    # tuned for long multi-word titles that wrap.
     add_text_box(
-        slide, brand, left, 2.3, width, 1.7,
+        slide, brand, left, 2.3, width, 1.9,
         as_text(spec.get("title"), "Untitled"),
         "header", sizes["title"], colour(brand, "ink"),
         align=align, bold=True, is_header=True,
     )
-    add_text_box(
-        slide, brand, left, 4.15, width, 1.0,
-        as_text(spec.get("promise")),
+    # Promise reads at a clearly-secondary size, with comfortable wrap leading.
+    add_multiline(
+        slide, brand, left, 4.3, width, 1.4,
+        [as_text(spec.get("promise"))],
         "body", sizes["heading"], colour(brand, "muted"),
-        align=align,
+        align=align, line_spacing=1.25,
     )
     add_text_box(
-        slide, brand, left, 5.5, width, 0.5,
+        slide, brand, left, 5.85, width, 0.5,
         as_text(spec.get("byline")),
         "body", sizes["body"], colour(brand, "accent"),
-        align=align,
+        align=align, bold=True,
     )
 
 # === layouts/section_divider.py ===
@@ -546,10 +643,13 @@ def _render_title(slide, spec, brand, geom):
 
 def _render_section_divider(slide, spec, brand, geom):
     sizes = brand["sizes_pt"]
+    accent_hex = accent_for_role(brand, spec.get("accent_role"))
 
-    # Top accent band -- height scales with motif weight.
+    # Top accent band -- height scales with motif weight, colour from
+    # accent_role so divider can signal section tone (e.g. critical section
+    # opens with the warning accent rather than the deck's dominant accent).
     band_h = round(0.8 + 0.3 * brand["motif"]["weight"], 3)
-    add_filled_rect(slide, 0, 0, geom["slide_w"], band_h, colour(brand, "accent"))
+    add_filled_rect(slide, 0, 0, geom["slide_w"], band_h, accent_hex)
 
     left = geom["body_left"]
     width = geom["body_w"]
@@ -560,9 +660,13 @@ def _render_section_divider(slide, spec, brand, geom):
     add_text_box(
         slide, brand, left, band_h + 0.6, 4.5, 2.5,
         "%02d" % number,
-        "header", sizes["section_number"], colour(brand, "accent"),
+        "header", sizes["section_number"], accent_hex,
         bold=True, align=align,
     )
+    # Thin rule between numeral and title for designed structure.
+    rule_y = geom["slide_h"] - 2.9
+    add_filled_rect(slide, left, rule_y, 1.4, 0.06, accent_hex)
+
     add_text_box(
         slide, brand, left, geom["slide_h"] - 2.6, width, 1.6,
         as_text(spec.get("title"), "Section"),
@@ -580,6 +684,7 @@ This is also the universal safe fallback when a variant is unknown.
 
 def _render_single_statement(slide, spec, brand, geom):
     sizes = brand["sizes_pt"]
+    accent_hex = accent_for_role(brand, spec.get("accent_role"))
     # Statement reads from `statement`, else any title-ish field.
     text = (
         spec.get("statement")
@@ -588,8 +693,12 @@ def _render_single_statement(slide, spec, brand, geom):
         or spec.get("quote")
     )
     align = "left" if geom["alignment"] == "asymmetric" else "center"
+    # Short accent rule above the statement -- visual entry point.
+    rule_x = (geom["slide_w"] - 1.4) / 2 if align == "center" else geom["body_left"]
+    add_filled_rect(slide, rule_x, 2.1, 1.4, 0.06, accent_hex)
+
     add_text_box(
-        slide, brand, geom["body_left"], 2.4, geom["body_w"], 2.7,
+        slide, brand, geom["body_left"], 2.5, geom["body_w"], 2.7,
         as_text(text, ""),
         "header", sizes["statement"], colour(brand, "ink"),
         align=align, anchor="middle",
@@ -602,44 +711,55 @@ def _render_single_statement(slide, spec, brand, geom):
 
 def _render_recap(slide, spec, brand, geom):
     sizes = brand["sizes_pt"]
-    left, top, width, height = (
-        geom["body_left"], geom["heading_top"],
-        geom["body_w"], geom["heading_h"],
-    )
+    accent_hex = accent_for_role(brand, spec.get("accent_role"))
 
-    add_text_box(
-        slide, brand, left, top, width, height,
-        "Takeaways", "header", sizes["heading"], colour(brand, "ink"),
-        bold=True, is_header=True,
-    )
+    draw_heading(slide, brand, geom, "Takeaways",
+                 accent_role=spec.get("accent_role", "neutral"))
 
-    content_top = geom["content_top"]
+    content_top = geom["content_top"] + 0.15
+    left = geom["body_left"]
+    width = geom["body_w"]
     split = left + width * 0.62
+    height = geom["content_bottom"] - content_top
+
     takeaways = spec.get("takeaways")
     if not isinstance(takeaways, list):
         takeaways = [as_text(takeaways)] if takeaways else []
+    # Accent-coloured bullets on takeaway list -- subtle finish that ties
+    # the slide back to the deck identity.
     add_multiline(
-        slide, brand, left, content_top, width * 0.58,
-        geom["content_bottom"] - content_top,
+        slide, brand, left, content_top, width * 0.58, height,
         [as_text(t) for t in takeaways],
-        "body", sizes["body"], colour(brand, "ink"), bullet=True,
+        "body", sizes["body"] + 1, colour(brand, "ink"),
+        bullet=True, bullet_colour_hex=accent_hex,
+        line_spacing=1.35,
     )
 
+    # Next-step block sits on a surface card with a top accent rule.
+    card_x, card_y = split, content_top
+    card_w, card_h = width * 0.38, height
+    add_filled_rect(slide, card_x, card_y, card_w, card_h, colour(brand, "surface"))
+    add_filled_rect(slide, card_x, card_y, card_w, 0.08, accent_hex)
+    pad = 0.3
     add_text_box(
-        slide, brand, split, content_top, width * 0.38, 0.5,
+        slide, brand, card_x + pad, card_y + 0.3, card_w - 2 * pad, 0.5,
         "Next step", "header", sizes["pillar_heading"],
-        colour(brand, "accent"), bold=True, is_header=True,
+        accent_hex, bold=True, is_header=True,
     )
     add_text_box(
-        slide, brand, split, content_top + 0.65, width * 0.38,
-        geom["content_bottom"] - content_top - 0.65,
+        slide, brand, card_x + pad, card_y + 0.95, card_w - 2 * pad,
+        card_h - 1.1,
         as_text(spec.get("next_step")),
-        "body", sizes["body"], colour(brand, "ink"),
+        "body", sizes["body"] + 1, colour(brand, "ink"),
     )
 
 # === layouts/stat_callout.py ===
 """focus family / stat_callout variant: hero number with unit + context."""
 
+
+# Units that read naturally INLINE with the number (no line break).
+# Words like "hours", "kg", "students" still stack on their own line.
+_INLINE_UNITS = {"%", "°", "×", "x", "+", "-", "K", "M", "B", "k", "m"}
 
 
 def _render_stat_callout(slide, spec, brand, geom):
@@ -647,29 +767,52 @@ def _render_stat_callout(slide, spec, brand, geom):
     left = geom["body_left"]
     width = geom["body_w"]
     align = "left" if geom["alignment"] == "asymmetric" else "center"
+    accent_hex = accent_for_role(brand, spec.get("accent_role"))
 
     stat = as_text(spec.get("stat"))
     unit = as_text(spec.get("unit"))
-    # Hero number, then the unit on its own line (smaller), then context.
-    # stat and unit must never be concatenated -- "2" + "hours" -> "2hours".
-    add_text_box(
-        slide, brand, left, 1.5, width, 2.4,
-        stat,
-        "header", sizes["stat"], colour(brand, "accent"),
-        align=align, anchor="middle", bold=True,
-    )
-    if unit:
+
+    # If unit is a single symbol (%, °, +, ×, K, M, B), render inline with the
+    # number. Otherwise stack it underneath so e.g. "12 students" stays clear.
+    inline_unit = unit and (unit.strip() in _INLINE_UNITS or len(unit.strip()) == 1)
+    if inline_unit:
+        # Stat and inline unit as one display block. Unit gets ~55% of the
+        # stat size so it reads as a partner glyph, not a sibling number.
+        # We approximate this with two text boxes side-by-side, anchored by
+        # the unit length.
+        # Simple path: render "stat + unit" together at the hero size, then
+        # null the unit so the stacked-unit branch is skipped.
+        hero_text = stat + unit
         add_text_box(
-            slide, brand, left, 3.85, width, 0.8,
-            unit,
-            "header", sizes["heading"], colour(brand, "ink"),
-            align=align, anchor="top", bold=True,
+            slide, brand, left, 2.0, width, 2.6,
+            hero_text,
+            "header", sizes["stat"], accent_hex,
+            align=align, anchor="middle", bold=True,
         )
+        context_top = 4.5
+    else:
+        add_text_box(
+            slide, brand, left, 1.5, width, 2.4,
+            stat,
+            "header", sizes["stat"], accent_hex,
+            align=align, anchor="middle", bold=True,
+        )
+        if unit:
+            add_text_box(
+                slide, brand, left, 3.85, width, 0.8,
+                unit,
+                "header", sizes["heading"], colour(brand, "ink"),
+                align=align, anchor="top", bold=True,
+            )
+            context_top = 4.8
+        else:
+            context_top = 4.1
+
     add_text_box(
-        slide, brand, left, 4.8, width, 1.6,
+        slide, brand, left, context_top, width, 1.8,
         as_text(spec.get("context")),
         "body", sizes["heading"], colour(brand, "muted"),
-        align=align,
+        align=align, anchor="top",
     )
 
 # === layouts/quote.py ===
@@ -681,22 +824,29 @@ def _render_quote(slide, spec, brand, geom):
     sizes = brand["sizes_pt"]
     left = geom["body_left"]
     width = geom["body_w"]
+    accent_hex = accent_for_role(brand, spec.get("accent_role"))
 
     # Oversized opening mark in the accent colour.
     add_text_box(
         slide, brand, left, 0.6, 2.2, 1.7,
-        "“",
-        "header", int(sizes["section_number"] * 1.6), colour(brand, "accent"),
+        "\u201C",
+        "header", int(sizes["section_number"] * 1.6), accent_hex,
         bold=True,
     )
+    # Quote body wrapped in proper curly quotes (open already drawn oversized,
+    # but include both inline too so the body reads as a complete sentence).
+    body_quote = as_text(spec.get("quote"))
+    if body_quote and not body_quote.endswith("\u201D"):
+        body_quote = body_quote.rstrip(".") + "\u201D"
     add_text_box(
         slide, brand, left, 2.1, width, 3.2,
-        as_text(spec.get("quote")),
+        body_quote,
         "header", sizes["heading"], colour(brand, "ink"),
     )
+    # Em-dash before attribution (designed convention, not "- ").
     add_text_box(
         slide, brand, left, 5.5, width, 0.7,
-        "- " + as_text(spec.get("attribution")),
+        "\u2014 " + as_text(spec.get("attribution")),
         "body", sizes["body"], colour(brand, "muted"),
     )
 
@@ -709,58 +859,67 @@ right_block_type is one of quote | stat | diagram (chart treated as diagram).
 
 
 def _heading(slide, spec, brand, geom):
-    add_text_box(
-        slide, brand, geom["margin"], geom["heading_top"],
-        geom["content_w"], geom["heading_h"],
-        as_text(spec.get("heading")),
-        "header", brand["sizes_pt"]["heading"], colour(brand, "ink"),
-        bold=True, is_header=True,
-    )
+    """Kept for backward-compat; new code calls draw_heading directly."""
+    draw_heading(slide, brand, geom, spec.get("heading"),
+                 accent_role=spec.get("accent_role", "neutral"))
 
 
-def _right_quote(slide, box, content, brand):
+def _right_quote(slide, box, content, brand, accent_hex):
     sizes = brand["sizes_pt"]
     left, top, width, height = box
     add_text_box(
         slide, brand, left, top, width, height - 0.8,
-        "“" + as_text(content.get("quote")) + "”",
+        "\u201C" + as_text(content.get("quote")) + "\u201D",
         "header", sizes["pillar_heading"] + 4, colour(brand, "ink"),
     )
     add_text_box(
         slide, brand, left, top + height - 0.7, width, 0.5,
-        "- " + as_text(content.get("attribution")),
+        "\u2014 " + as_text(content.get("attribution")),
         "body", sizes["body"], colour(brand, "muted"),
     )
 
 
-def _right_stat(slide, box, content, brand):
+def _right_stat(slide, box, content, brand, accent_hex):
     sizes = brand["sizes_pt"]
     left, top, width, height = box
+    stat = as_text(content.get("stat"))
     unit = as_text(content.get("unit"))
-    # Hero number, then unit on its own line, then context. stat and unit
-    # are never concatenated.
-    add_text_box(
-        slide, brand, left, top, width, 1.5,
-        as_text(content.get("stat")),
-        "header", sizes["stat"] - 24, colour(brand, "accent"),
-        bold=True, anchor="middle", align="center",
-    )
-    if unit:
+
+    # Same inline-symbol rule as _render_stat_callout.
+    inline_unit = unit and (unit.strip() in _INLINE_UNITS or len(unit.strip()) == 1)
+    if inline_unit:
         add_text_box(
-            slide, brand, left, top + 1.5, width, 0.5,
-            unit,
-            "header", sizes["body"] + 2, colour(brand, "ink"),
-            bold=True, anchor="top", align="center",
+            slide, brand, left, top, width, 1.7,
+            stat + unit,
+            "header", sizes["stat"] - 24, accent_hex,
+            bold=True, anchor="middle", align="center",
         )
+        ctx_top = top + 1.8
+    else:
+        add_text_box(
+            slide, brand, left, top, width, 1.5,
+            stat,
+            "header", sizes["stat"] - 24, accent_hex,
+            bold=True, anchor="middle", align="center",
+        )
+        if unit:
+            add_text_box(
+                slide, brand, left, top + 1.5, width, 0.5,
+                unit,
+                "header", sizes["body"] + 2, colour(brand, "ink"),
+                bold=True, anchor="top", align="center",
+            )
+        ctx_top = top + 2.2
+
     add_text_box(
-        slide, brand, left, top + 2.2, width, height - 2.2,
+        slide, brand, left, ctx_top, width, height - (ctx_top - top),
         as_text(content.get("context")),
         "body", sizes["body"], colour(brand, "muted"),
         align="center",
     )
 
 
-def _right_diagram(slide, box, content, brand):
+def _right_diagram(slide, box, content, brand, accent_hex):
     left, top, width, height = box
     add_text_box(
         slide, brand, left, top, width, height,
@@ -779,9 +938,11 @@ _RIGHT = {
 
 
 def _render_two_up(slide, spec, brand, geom):
-    _heading(slide, spec, brand, geom)
+    draw_heading(slide, brand, geom, spec.get("heading"),
+                 accent_role=spec.get("accent_role", "neutral"))
     sizes = brand["sizes_pt"]
-    top = geom["content_top"]
+    accent_hex = accent_for_role(brand, spec.get("accent_role"))
+    top = geom["content_top"] + 0.15
     height = geom["content_bottom"] - top
     gap = geom["gap"]
     left = geom["body_left"]
@@ -794,16 +955,17 @@ def _render_two_up(slide, spec, brand, geom):
     )
 
     right_left = left + col_w + gap
-    # Surface-tinted card behind the right block for visual weight.
+    # Surface-tinted card with a top accent rule -- ties right block to deck.
     add_filled_rect(slide, right_left, top, col_w, height, colour(brand, "surface"))
+    add_filled_rect(slide, right_left, top, col_w, 0.08, accent_hex)
 
     rtype = spec.get("right_block_type", "diagram")
     content = spec.get("right_block_content")
     if not isinstance(content, dict):
         content = {}
     pad = 0.3
-    box = (right_left + pad, top + pad, col_w - 2 * pad, height - 2 * pad)
-    _RIGHT.get(rtype, _right_diagram)(slide, box, content, brand)
+    box = (right_left + pad, top + 0.4, col_w - 2 * pad, height - 0.5)
+    _RIGHT.get(rtype, _right_diagram)(slide, box, content, brand, accent_hex)
 
 # === layouts/compare_contrast.py ===
 """split family / compare_contrast variant: heading + two labelled columns."""
@@ -812,36 +974,52 @@ def _render_two_up(slide, spec, brand, geom):
 
 def _render_compare_contrast(slide, spec, brand, geom):
     sizes = brand["sizes_pt"]
-    add_text_box(
-        slide, brand, geom["margin"], geom["heading_top"],
-        geom["content_w"], geom["heading_h"],
-        as_text(spec.get("heading")),
-        "header", sizes["heading"], colour(brand, "ink"),
-        bold=True, is_header=True,
-    )
+    # Heading carries the deck's neutral accent rule.
+    draw_heading(slide, brand, geom, spec.get("heading"),
+                 accent_role=spec.get("accent_role", "neutral"))
 
-    top = geom["content_top"]
+    top = geom["content_top"] + 0.15
     height = geom["content_bottom"] - top
     gap = geom["gap"]
     left = geom["body_left"]
     col_w = (geom["body_w"] - gap) / 2.0
 
+    # Per-side accent_role drives the column accent. Writers can flag:
+    #   left_accent_role:  "warning" / "critical"  (e.g. the "Bystander" side)
+    #   right_accent_role: "positive"              (e.g. the "Upstander" side)
+    # Falling back to (left=neutral, right=positive) is safer than the old
+    # hard-coded (left=accent, right=accent_2) which painted *both* sides
+    # with deck accents regardless of meaning.
+    side_roles = {
+        "left": spec.get("left_accent_role", "neutral"),
+        "right": spec.get("right_accent_role", "positive"),
+    }
+
     for idx, side in enumerate(("left", "right")):
         x = left + idx * (col_w + gap)
-        accent_role = "accent" if side == "left" else "accent_2"
+        col_accent = accent_for_role(brand, side_roles[side])
+
+        # 0.08" accent bar across the top of the column. Strong visual signature
+        # that the two columns are semantically different.
+        add_filled_rect(slide, x, top, col_w, 0.08, col_accent)
+
+        # Label in the column's accent.
         add_text_box(
-            slide, brand, x, top, col_w, 0.6,
+            slide, brand, x, top + 0.18, col_w, 0.6,
             as_text(spec.get(side + "_label")),
-            "header", sizes["pillar_heading"], colour(brand, accent_role),
+            "header", sizes["pillar_heading"], col_accent,
             bold=True, is_header=True,
         )
         points = spec.get(side + "_points")
         if not isinstance(points, list):
             points = [as_text(points)] if points else []
+        # Bullets sit in the column's accent colour -- subtle but designerly.
         add_multiline(
-            slide, brand, x, top + 0.7, col_w, height - 0.7,
+            slide, brand, x, top + 0.95, col_w, height - 1.0,
             [as_text(p) for p in points],
-            "body", sizes["body"], colour(brand, "ink"), bullet=True,
+            "body", sizes["body"], colour(brand, "ink"),
+            bullet=True, bullet_colour_hex=col_accent,
+            line_spacing=1.25,
         )
 
 # === layouts/pillars.py ===
@@ -852,7 +1030,7 @@ pillars_4 -> exactly 4. A wrong count is padded/truncated, never raised.
 """
 
 def _empty_pillar():
-    return {"icon_glyph": "", "heading": "", "body": ""}
+    return {"icon_glyph": "", "heading": "", "body": "", "accent_role": "neutral"}
 
 
 def _render_pillars(slide, spec, brand, geom):
@@ -860,51 +1038,52 @@ def _render_pillars(slide, spec, brand, geom):
     variant = spec.get("variant", "pillars_3")
     count = 4 if variant == "pillars_4" else 3
 
-    add_text_box(
-        slide, brand, geom["margin"], geom["heading_top"],
-        geom["content_w"], geom["heading_h"],
-        as_text(spec.get("heading")),
-        "header", sizes["heading"], colour(brand, "ink"),
-        bold=True, is_header=True,
-    )
+    draw_heading(slide, brand, geom, spec.get("heading"),
+                 accent_role=spec.get("accent_role", "neutral"))
 
     pillars = coerce_count(spec.get("pillars"), count, count, _empty_pillar)
 
-    top = geom["content_top"]
+    top = geom["content_top"] + 0.15
     height = geom["content_bottom"] - top
     gap = max(geom["gap"], 0.25)
     left = geom["body_left"]
     col_w = (geom["body_w"] - gap * (count - 1)) / count
-
-    icon = round(col_w * 0.16, 3)
-    accent = colour(brand, "accent")
     body_size = sizes["body"] if count == 3 else max(11, sizes["body"] - 3)
 
+    # Cards fill the full body height -- no more dead space underneath. The
+    # top accent stripe is the per-pillar signature; we drop the old icon-glyph
+    # square because LLM writers consistently fell back to meaningless single
+    # letters. A per-pillar accent_role lets writers paint specific pillars
+    # warning/positive when the meaning warrants.
     for i, pillar in enumerate(pillars):
         if not isinstance(pillar, dict):
             pillar = _empty_pillar()
         x = left + i * (col_w + gap)
 
-        add_filled_rect(slide, x, top, icon, icon, accent)
+        pillar_accent = accent_for_role(brand, pillar.get("accent_role"))
+
+        # Card body (surface fill).
+        add_filled_rect(slide, x, top, col_w, height, colour(brand, "surface"))
+        # Top accent stripe -- the pillar's identity.
+        add_filled_rect(slide, x, top, col_w, 0.10, pillar_accent)
+
+        # Heading.
+        pad_x = 0.25
+        head_top = top + 0.35
         add_text_box(
-            slide, brand, x, top, icon, icon,
-            as_text(pillar.get("icon_glyph")),
-            "header", max(10, int(icon * 34)), readable_on(brand, accent),
-            bold=True, align="center", anchor="middle",
-        )
-        head_top = top + icon + 0.15
-        add_text_box(
-            slide, brand, x, head_top, col_w, 0.7,
+            slide, brand, x + pad_x, head_top, col_w - 2 * pad_x, 0.7,
             as_text(pillar.get("heading")),
             "header", sizes["pillar_heading"], colour(brand, "ink"),
             bold=True, is_header=True,
         )
-        body_top = head_top + 0.8
+        # Body.
+        body_top = head_top + 0.85
         add_multiline(
-            slide, brand, x, body_top, col_w,
-            top + height - body_top,
+            slide, brand, x + pad_x, body_top, col_w - 2 * pad_x,
+            top + height - body_top - 0.25,
             [as_text(pillar.get("body"))],
             "body", body_size, colour(brand, "ink"),
+            line_spacing=1.25,
         )
 
 # === layouts/quadrant_grid.py ===
@@ -914,22 +1093,17 @@ VARIANT_ELEMENT_COUNTS: exactly 4 cells -- padded/truncated, never raised.
 """
 
 def _empty_cell():
-    return {"number": "", "label": "", "body": ""}
+    return {"number": "", "label": "", "body": "", "accent_role": "neutral"}
 
 
 def _render_quadrant_grid(slide, spec, brand, geom):
     sizes = brand["sizes_pt"]
-    add_text_box(
-        slide, brand, geom["margin"], geom["heading_top"],
-        geom["content_w"], geom["heading_h"],
-        as_text(spec.get("heading")),
-        "header", sizes["heading"], colour(brand, "ink"),
-        bold=True, is_header=True,
-    )
+    draw_heading(slide, brand, geom, spec.get("heading"),
+                 accent_role=spec.get("accent_role", "neutral"))
 
     cells = coerce_count(spec.get("cells"), 4, 4, _empty_cell)
 
-    top = geom["content_top"]
+    top = geom["content_top"] + 0.15
     height = geom["content_bottom"] - top
     gap = max(geom["gap"], 0.25)
     left = geom["body_left"]
@@ -940,17 +1114,18 @@ def _render_quadrant_grid(slide, spec, brand, geom):
         (left, top), (left + cw + gap, top),
         (left, top + ch + gap), (left + cw + gap, top + ch + gap),
     ]
-    border = colour(brand, "accent")
 
     for (x, y), cell in zip(positions, cells):
         if not isinstance(cell, dict):
             cell = _empty_cell()
+        cell_accent = accent_for_role(brand, cell.get("accent_role"))
+
         add_rounded_rect(slide, x, y, cw, ch, colour(brand, "surface"),
-                         line_hex=border)
+                         line_hex=cell_accent)
         add_text_box(
             slide, brand, x + 0.2, y + 0.12, 1.1, 1.0,
             as_text(cell.get("number")),
-            "header", max(20, sizes["heading"] + 8), colour(brand, "accent"),
+            "header", max(20, sizes["heading"] + 8), cell_accent,
             bold=True,
         )
         add_text_box(
@@ -963,6 +1138,7 @@ def _render_quadrant_grid(slide, spec, brand, geom):
             slide, brand, x + 0.3, y + 1.0, cw - 0.6, ch - 1.2,
             [as_text(cell.get("body"))],
             "body", sizes["body"], colour(brand, "ink"),
+            line_spacing=1.25,
         )
 
 # === layouts/process_flow.py ===
@@ -972,43 +1148,70 @@ VARIANT_ELEMENT_COUNTS: 4-6 steps. Fewer/more -> padded/truncated, never raised.
 """
 
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+from pptx.enum.shapes import MSO_SHAPE
 from pptx.util import Pt
 
 def _empty_step():
-    return {"number": "", "label": "", "detail": ""}
+    return {"number": "", "label": "", "detail": "", "accent_role": "neutral"}
 
 
 def _render_process_flow(slide, spec, brand, geom):
     sizes = brand["sizes_pt"]
-    add_text_box(
-        slide, brand, geom["margin"], geom["heading_top"],
-        geom["content_w"], geom["heading_h"],
-        as_text(spec.get("heading")),
-        "header", sizes["heading"], colour(brand, "ink"),
-        bold=True, is_header=True,
-    )
+    draw_heading(slide, brand, geom, spec.get("heading"),
+                 accent_role=spec.get("accent_role", "neutral"))
 
     steps = coerce_count(spec.get("steps"), 4, 6, _empty_step)
     n = len(steps)
 
-    top = geom["content_top"]
+    top = geom["content_top"] + 0.2
     gap = max(geom["gap"], 0.2)
     left = geom["body_left"]
+    # Chevron tail width -- reserve from the right edge of each box.
+    chev_w = 0.22
     box_w = (geom["body_w"] - gap * (n - 1)) / n
     box_h = 1.9
-    accent = colour(brand, "accent")
-    on_accent = readable_on(brand, accent)
+    deck_accent = accent_for_role(brand, spec.get("accent_role"))
 
     for i, step in enumerate(steps):
         if not isinstance(step, dict):
             step = _empty_step()
         x = left + i * (box_w + gap)
-        rect = add_rounded_rect(slide, x, top, box_w, box_h, accent)
+
+        # Per-step accent_role lets writers escalate one step (e.g. the
+        # "danger" or "success" terminus). Default uses the deck accent.
+        step_accent = accent_for_role(brand, step.get("accent_role"))
+        on_accent = readable_on(brand, step_accent)
+
+        # Chevron-shaped box for all but the last; rounded rect for the last.
+        is_last = (i == n - 1)
+        if is_last:
+            rect = add_rounded_rect(slide, x, top, box_w, box_h, step_accent)
+        else:
+            shape = slide.shapes.add_shape(
+                MSO_SHAPE.PENTAGON,  # right-pointing chevron-like shape
+                Inches(x), Inches(top), Inches(box_w), Inches(box_h),
+            )
+            shape.fill.solid()
+            shape.fill.fore_color.rgb = hex_to_rgb(step_accent)
+            shape.line.fill.background()
+            shape.shadow.inherit = False
+            rect = shape
+
+        # Step number badge in the top-left corner of each box.
+        num = coerce_int(step.get("number"), i + 1)
+        add_text_box(
+            slide, brand, x + 0.15, top + 0.12, 0.9, 0.5,
+            "%02d" % num,
+            "header", max(14, sizes["body"] + 4), on_accent,
+            bold=True,
+        )
+
+        # Step label fills the rest of the box, vertically centred.
         tf = rect.text_frame
         tf.word_wrap = True
         tf.vertical_anchor = MSO_ANCHOR.MIDDLE
         p = tf.paragraphs[0]
-        p.text = apply_header_case(brand, as_text(step.get("label")))
+        p.text = "\n\n" + apply_header_case(brand, as_text(step.get("label")))
         p.alignment = PP_ALIGN.CENTER
         if p.runs:
             run = p.runs[0]
@@ -1017,6 +1220,7 @@ def _render_process_flow(slide, spec, brand, geom):
             run.font.bold = True
             run.font.color.rgb = hex_to_rgb(on_accent)
 
+        # Detail text below the step box.
         add_text_box(
             slide, brand, x, top + box_h + 0.2, box_w,
             geom["content_bottom"] - top - box_h - 0.2,
@@ -1043,15 +1247,10 @@ _CHART_TYPE_MAP = {
 
 def _render_chart(slide, spec, brand, geom):
     sizes = brand["sizes_pt"]
-    add_text_box(
-        slide, brand, geom["margin"], geom["heading_top"],
-        geom["content_w"], geom["heading_h"],
-        as_text(spec.get("heading")),
-        "header", sizes["heading"], colour(brand, "ink"),
-        bold=True, is_header=True,
-    )
+    draw_heading(slide, brand, geom, spec.get("heading"),
+                 accent_role=spec.get("accent_role", "neutral"))
 
-    top = geom["content_top"]
+    top = geom["content_top"] + 0.15
     height = geom["content_bottom"] - top - 0.5
     chart_type = _CHART_TYPE_MAP.get(
         spec.get("chart_type", "bar"), XL_CHART_TYPE.BAR_CLUSTERED
@@ -1113,13 +1312,9 @@ _MAX_COLS = 4
 
 def _render_data_table(slide, spec, brand, geom):
     sizes = brand["sizes_pt"]
-    add_text_box(
-        slide, brand, geom["margin"], geom["heading_top"],
-        geom["content_w"], geom["heading_h"],
-        as_text(spec.get("heading")),
-        "header", sizes["heading"], colour(brand, "ink"),
-        bold=True, is_header=True,
-    )
+    draw_heading(slide, brand, geom, spec.get("heading"),
+                 accent_role=spec.get("accent_role", "neutral"))
+    accent = accent_for_role(brand, spec.get("accent_role"))
 
     columns = spec.get("columns")
     if not isinstance(columns, list) or not columns:
@@ -1139,7 +1334,7 @@ def _render_data_table(slide, spec, brand, geom):
         cells += [""] * (n_cols - len(cells))
         norm_rows.append(cells)
 
-    top = geom["content_top"]
+    top = geom["content_top"] + 0.15
     table = slide.shapes.add_table(
         rows=len(norm_rows) + 1, cols=n_cols,
         left=Inches(geom["body_left"]), top=Inches(top),
@@ -1147,7 +1342,6 @@ def _render_data_table(slide, spec, brand, geom):
         height=Inches(geom["content_bottom"] - top),
     ).table
 
-    accent = colour(brand, "accent")
     on_accent = readable_on(brand, accent)
     ink = colour(brand, "ink")
     surface = colour(brand, "surface")
@@ -1169,18 +1363,28 @@ def _render_data_table(slide, spec, brand, geom):
         if isinstance(pair, (list, tuple)) and len(pair) == 2:
             emphasis.add((pair[0], pair[1]))
 
+    # Zebra striping: every other row gets a surface tint. Emphasis cells
+    # override with the explicit emphasis fill.
     for r, row in enumerate(norm_rows):
+        is_zebra = (r % 2 == 1)
         for c, value in enumerate(row):
             cell = table.cell(r + 1, c)
             cell.text = value
             if (r, c) in emphasis:
                 cell.fill.solid()
+                cell.fill.fore_color.rgb = hex_to_rgb(accent)
+                cell_text_hex = on_accent
+            elif is_zebra:
+                cell.fill.solid()
                 cell.fill.fore_color.rgb = hex_to_rgb(surface)
+                cell_text_hex = ink
+            else:
+                cell_text_hex = ink
             for para in cell.text_frame.paragraphs:
                 for run in para.runs:
                     run.font.name = brand["fonts"]["body"]
                     run.font.size = Pt(sizes["caption"] + 1)
-                    run.font.color.rgb = hex_to_rgb(ink)
+                    run.font.color.rgb = hex_to_rgb(cell_text_hex)
 
 # === layouts/stat_doughnut.py ===
 """data family / stat_doughnut variant: heading + 3 side-by-side doughnuts.
@@ -1208,17 +1412,12 @@ def _pct(value):
 
 def _render_stat_doughnut(slide, spec, brand, geom):
     sizes = brand["sizes_pt"]
-    add_text_box(
-        slide, brand, geom["margin"], geom["heading_top"],
-        geom["content_w"], geom["heading_h"],
-        as_text(spec.get("heading")),
-        "header", sizes["heading"], colour(brand, "ink"),
-        bold=True, is_header=True,
-    )
+    draw_heading(slide, brand, geom, spec.get("heading"),
+                 accent_role=spec.get("accent_role", "neutral"))
 
     doughnuts = coerce_count(spec.get("doughnuts"), 3, 3, _empty_doughnut)
     n = 3
-    top = geom["content_top"]
+    top = geom["content_top"] + 0.15
     left = geom["body_left"]
     size = min(3.2, (geom["body_w"] - 0.6) / n)
     gap = (geom["body_w"] - size * n) / (n - 1) if n > 1 else 0
@@ -1273,6 +1472,17 @@ _SEVERITY_ROLE = {
 }
 
 
+# Severity glyphs read at scale -- single Unicode characters that ship with
+# every font we use. Keeps the badge visible even when the font lacks
+# emoji support.
+_SEVERITY_GLYPH = {
+    "info":     "i",
+    "positive": "+",
+    "warning":  "!",
+    "critical": "!",
+}
+
+
 def _render_callout_box(slide, spec, brand, geom):
     sizes = brand["sizes_pt"]
     severity = spec.get("severity", "info")
@@ -1288,18 +1498,35 @@ def _render_callout_box(slide, spec, brand, geom):
 
     add_rounded_rect(slide, left, top, width, height, fill)
 
-    pad = 0.45
+    # Severity badge -- a small circle in the top-left with a single glyph.
+    # Reads as "this is a warning/info" without needing to load an icon font.
+    badge_size = 0.65
+    badge_x = left + 0.4
+    badge_y = top + 0.4
+    badge_fill = text_hex  # use the readable text colour for the badge fill
+    add_oval(slide, badge_x, badge_y, badge_size, badge_size, badge_fill)
     add_text_box(
-        slide, brand, left + pad, top + pad, width - 2 * pad, 0.9,
+        slide, brand, badge_x, badge_y - 0.02, badge_size, badge_size,
+        _SEVERITY_GLYPH.get(severity, "i"),
+        "header", int(sizes["heading"] * 0.9), fill,
+        bold=True, align="center", anchor="middle",
+    )
+
+    pad = 0.45
+    head_left = badge_x + badge_size + 0.3
+    add_text_box(
+        slide, brand, head_left, top + pad,
+        width - (head_left - left) - pad, 0.9,
         as_text(spec.get("heading")),
         "header", sizes["heading"], text_hex,
         bold=True, is_header=True,
     )
-    add_text_box(
-        slide, brand, left + pad, top + pad + 1.0,
-        width - 2 * pad, height - pad - 1.3,
-        as_text(spec.get("body")),
-        "body", sizes["body"], text_hex,
+    add_multiline(
+        slide, brand, left + pad, top + pad + 1.2,
+        width - 2 * pad, height - pad - 1.5,
+        [as_text(spec.get("body"))],
+        "body", sizes["body"] + 2, text_hex,
+        line_spacing=1.4,
     )
 
 # === renderer.py ===
@@ -1370,16 +1597,32 @@ def _slide_brand(design_tokens, base_brand, slide_spec):
 
 
 def _draw_footer(slide, brand, geom, footer_text, position):
+    """Two-part footer: footer_text in muted, page number in accent.
+    Keeps the deck identity visible without dominating any slide.
+    """
     if not footer_text:
         return
     n = coerce_int(position, 0)
-    text = "%s    |    %d" % (as_text(footer_text), n) if n else as_text(footer_text)
+    label = as_text(footer_text)
+    sizes = brand["sizes_pt"]
+    y = geom["slide_h"] - 0.45
+
+    # Footer label (left of separator) in muted.
     add_text_box(
-        slide, brand, geom["margin"], geom["slide_h"] - 0.45,
-        geom["content_w"], 0.35,
-        text, "body", brand["sizes_pt"]["caption"],
+        slide, brand, geom["margin"], y,
+        geom["content_w"] - 0.4, 0.35,
+        label, "body", sizes["caption"],
         colour(brand, "muted"), align="right",
     )
+    # Page number in accent at the far right -- small designed touch that
+    # makes the deck feel produced rather than auto-generated.
+    if n:
+        add_text_box(
+            slide, brand, geom["slide_w"] - geom["margin"] - 0.6, y,
+            0.55, 0.35,
+            "%02d" % n, "body", sizes["caption"],
+            colour(brand, "accent"), align="right", bold=True,
+        )
 
 
 def render_deck(deck_spec, design_tokens):

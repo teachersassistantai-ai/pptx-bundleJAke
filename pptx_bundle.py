@@ -311,7 +311,11 @@ def apply_header_case(brand, text):
         out = []
         for idx, w in enumerate(words):
             lw = w.lower()
-            if idx != 0 and lw in small:
+            # Preserve acronyms / initialisms (WWI, mRNA, NASA, PD) -- any word
+            # carrying two or more capitals is left exactly as written.
+            if sum(1 for c in w if c.isupper()) >= 2:
+                out.append(w)
+            elif idx != 0 and lw in small:
                 out.append(lw)
             else:
                 out.append(w[:1].upper() + w[1:].lower() if w else w)
@@ -347,6 +351,21 @@ def _fit_font_size(text, width_in, height_in, size_pt, line_spacing=1.15):
             lines += 1 if n == 0 else -(-n // chars_per_line)
         needed = lines * size * line_spacing * 1.2
         if needed <= height_pt:
+            return round(size, 1)
+        size -= 1.0
+    return round(floor, 1)
+
+
+def _fit_one_line(longest_word_len, width_in, size_pt, floor=12.0):
+    """Shrink a font size so the longest single word fits on one line in
+    width_in inches -- prevents ugly mid-word breaks in narrow shapes such as
+    process-flow chevrons. Uses a wider 0.62em advance estimate because the
+    affected text is bold header type.
+    """
+    width_pt = max(0.5, width_in) * 72.0
+    size = float(size_pt)
+    while size > floor:
+        if longest_word_len <= width_pt / (0.62 * size):
             return round(size, 1)
         size -= 1.0
     return round(floor, 1)
@@ -1079,6 +1098,7 @@ def _render_pillars(slide, spec, brand, geom):
                  accent_role=spec.get("accent_role", "neutral"))
 
     pillars = coerce_count(spec.get("pillars"), count, count, _empty_pillar)
+    pillars = [p if isinstance(p, dict) else _empty_pillar() for p in pillars]
 
     top = geom["content_top"] + 0.15
     height = geom["content_bottom"] - top
@@ -1087,39 +1107,45 @@ def _render_pillars(slide, spec, brand, geom):
     col_w = (geom["body_w"] - gap * (count - 1)) / count
     body_size = sizes["body"] if count == 3 else max(11, sizes["body"] - 3)
 
-    # Cards fill the full body height -- no more dead space underneath. The
-    # top accent stripe is the per-pillar signature; we drop the old icon-glyph
-    # square because LLM writers consistently fell back to meaningless single
-    # letters. A per-pillar accent_role lets writers paint specific pillars
+    pad_x = 0.25
+    head_top = top + 0.35
+    head_w = col_w - 2 * pad_x
+    body_top = head_top + 0.85
+    body_h = top + height - body_top - 0.25
+
+    # Fit ONE heading size and ONE body size across all pillars so the row
+    # reads as a set. Sizing each card independently makes a longer heading
+    # shrink alone and the row looks ragged.
+    head_size = min(
+        _fit_font_size(as_text(p.get("heading")), head_w, 0.7,
+                       sizes["pillar_heading"])
+        for p in pillars
+    )
+    body_fit = min(
+        _fit_font_size(as_text(p.get("body")), head_w, body_h, body_size, 1.25)
+        for p in pillars
+    )
+
+    # Cards fill the full body height. The top accent stripe is the per-pillar
+    # signature; a per-pillar accent_role lets writers paint specific pillars
     # warning/positive when the meaning warrants.
     for i, pillar in enumerate(pillars):
-        if not isinstance(pillar, dict):
-            pillar = _empty_pillar()
         x = left + i * (col_w + gap)
-
         pillar_accent = accent_for_role(brand, pillar.get("accent_role"))
 
-        # Card body (surface fill).
         add_filled_rect(slide, x, top, col_w, height, colour(brand, "surface"))
-        # Top accent stripe -- the pillar's identity.
         add_filled_rect(slide, x, top, col_w, 0.10, pillar_accent)
 
-        # Heading.
-        pad_x = 0.25
-        head_top = top + 0.35
         add_text_box(
-            slide, brand, x + pad_x, head_top, col_w - 2 * pad_x, 0.7,
+            slide, brand, x + pad_x, head_top, head_w, 0.7,
             as_text(pillar.get("heading")),
-            "header", sizes["pillar_heading"], colour(brand, "ink"),
+            "header", head_size, colour(brand, "ink"),
             bold=True, is_header=True,
         )
-        # Body.
-        body_top = head_top + 0.85
         add_multiline(
-            slide, brand, x + pad_x, body_top, col_w - 2 * pad_x,
-            top + height - body_top - 0.25,
+            slide, brand, x + pad_x, body_top, head_w, body_h,
             [as_text(pillar.get("body"))],
-            "body", body_size, colour(brand, "ink"),
+            "body", body_fit, colour(brand, "ink"),
             line_spacing=1.25,
         )
 
@@ -1198,6 +1224,7 @@ def _render_process_flow(slide, spec, brand, geom):
                  accent_role=spec.get("accent_role", "neutral"))
 
     steps = coerce_count(spec.get("steps"), 4, 6, _empty_step)
+    steps = [s if isinstance(s, dict) else _empty_step() for s in steps]
     n = len(steps)
 
     top = geom["content_top"] + 0.2
@@ -1209,9 +1236,18 @@ def _render_process_flow(slide, spec, brand, geom):
     box_h = 1.9
     deck_accent = accent_for_role(brand, spec.get("accent_role"))
 
+    # ONE shared label size for every chevron: shrink until the longest word
+    # in ANY step fits on a single line. The pentagon's pointed tail eats
+    # part of the box, so the effective text width is ~0.68 of box_w. This
+    # kills the mid-word breaks ("Militaris / m") and keeps the row uniform.
+    _label_words = [
+        w for s in steps
+        for w in apply_header_case(brand, as_text(s.get("label"))).split()
+    ]
+    _longest = max((len(w) for w in _label_words), default=1)
+    label_size = _fit_one_line(_longest, box_w * 0.68, sizes["pillar_heading"])
+
     for i, step in enumerate(steps):
-        if not isinstance(step, dict):
-            step = _empty_step()
         x = left + i * (box_w + gap)
 
         # Per-step accent_role lets writers escalate one step (e.g. the
@@ -1253,7 +1289,7 @@ def _render_process_flow(slide, spec, brand, geom):
         if p.runs:
             run = p.runs[0]
             run.font.name = brand["fonts"]["header"]
-            run.font.size = Pt(sizes["pillar_heading"])
+            run.font.size = Pt(label_size)
             run.font.bold = True
             run.font.color.rgb = hex_to_rgb(on_accent)
 

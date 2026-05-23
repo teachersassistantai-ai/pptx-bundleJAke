@@ -12,7 +12,7 @@
 # Image is generated IN-PROCESS (OpenAI -> base64 -> BytesIO -> add_picture):
 # no temp-URL round trip, which is what was silently dropping the cover.
 # =============================================================================
-import json, re, math, io, base64, warnings, requests
+import json, re, math, io, base64, warnings, requests, json_repair
 from docx import Document
 from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH as WA
@@ -65,25 +65,23 @@ def pj(raw):
         return pj(raw["answer"]) if set(raw.keys()) == {"answer"} else raw
     if isinstance(raw, list) and raw and isinstance(raw[0], dict):
         return raw[0]
-    t = _strip_fences(str(raw).strip())
+    t = str(raw).strip()
     if t.lower() in ("null", "none", ""):
         return None
-    cands = [t, _esc_ctrl(t), t.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")]
+    # json_repair fixes fences, unescaped quotes (dialogue!), literal control chars,
+    # trailing commas -- everything LLMs get wrong. Try strict first (fast path).
+    r = None
     try:
-        s, e = t.index("{"), t.rindex("}")
-        inner = t[s:e + 1]
-        cands += [inner, _esc_ctrl(inner)]
+        r = json.loads(_strip_fences(t))
     except Exception:
-        pass
-    for c in cands:
         try:
-            r = json.loads(c)
-            if isinstance(r, dict):
-                return pj(r) if set(r.keys()) == {"answer"} else r
-            if isinstance(r, list) and r and isinstance(r[0], dict):
-                return r[0]
+            r = json_repair.loads(t)
         except Exception:
-            pass
+            r = None
+    if isinstance(r, dict):
+        return pj(r) if set(r.keys()) == {"answer"} else (r or None)
+    if isinstance(r, list) and r and isinstance(r[0], dict):
+        return r[0]
     return None
 
 

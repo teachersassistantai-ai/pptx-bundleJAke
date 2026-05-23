@@ -83,6 +83,8 @@ lit = pj(lit_raw); num = pj(num_raw)
 enrich = pj(enrich_raw) or {}
 topic_clarified = (enrich.get("topic_clarified") or topic or "").strip() or topic
 au_context = (enrich.get("australian_context") or "").strip()
+# Catchy generated booklet title (NOT the raw user topic, which may be dull/misspelt).
+title = (enrich.get("pack_title") or "").strip() or topic
 intro = (intro_raw or "").strip()
 _tf = (timeframe or "").lower()
 # True multi-day only: "1 day"/"2 days"/"3 days"/weeks. "Half day" is single-session.
@@ -271,17 +273,28 @@ else:
     def cover_image_stream():
         if not openai_key:
             return None
-        # Use an IP-SAFE generic subject from enrichment (OpenAI refuses real people,
-        # celebrities, brands, logos and copyrighted characters -> silent failure).
+        # IP-SAFE generic subject from enrichment (OpenAI refuses real people, celebrities,
+        # brands, logos, copyrighted chars -> silent failure). Vary the ART STYLE by the
+        # rotation seed so the cover is creative and different each run, not a fixed look.
         subj = (enrich.get("image_subject") or "").strip() or topic_clarified
-        style = {"PRIMARY": "warm friendly children's book illustration, soft rounded shapes, vibrant colours, hand-drawn feel, playful",
-                 "MIDDLE": "modern editorial illustration, clean lines, balanced colour palette, slightly stylised",
-                 "SENIOR": "sophisticated editorial illustration, refined limited palette, mature composition"}[band_name]
-        prompt = ("An original illustration of: " + subj + ". " + style +
-                  ". Suitable as a student workbook cover. Show only a generic, original scene -- do NOT "
-                  "depict any real or named person, celebrity, athlete, brand, company, logo, trademark, or "
-                  "copyrighted character. ABSOLUTELY NO TEXT, NO WORDS, NO LETTERS, NO NUMBERS anywhere in the "
-                  "image. A single clear focal point, clean uncluttered composition. No borders, no watermark.")
+        mood = {"PRIMARY": "playful, warm, friendly, full of wonder",
+                "MIDDLE": "vibrant, dynamic and engaging",
+                "SENIOR": "striking, sophisticated and refined"}[band_name]
+        STYLES = ["bold flat-colour vector illustration", "lush storybook gouache painting",
+                  "retro screen-print poster art", "papercut collage with layered depth",
+                  "dynamic comic-book panel art", "clean isometric 3D-style render",
+                  "textured chalk-and-pastel illustration", "vivid gradient digital art",
+                  "hand-drawn ink-and-watercolour", "mid-century-modern poster design"]
+        try:
+            si = int(re.sub(r"\D", "", str(seed_raw)) or "0")
+        except Exception:
+            si = 0
+        art = STYLES[si % len(STYLES)]
+        prompt = ("A creative, eye-catching cover illustration of: " + subj + ". Art style: " + art +
+                  ". Mood: " + mood + ". Be imaginative and visually striking -- strong composition, depth and "
+                  "interesting lighting, never flat or generic. Show only an original, generic scene; do NOT depict "
+                  "any real or named person, celebrity, athlete, brand, company, logo, trademark, or copyrighted "
+                  "character. ABSOLUTELY NO TEXT, NO WORDS, NO LETTERS, NO NUMBERS anywhere. No borders, no watermark.")
         try:
             resp = requests.post(
                 "https://api.openai.com/v1/images/generations",
@@ -301,11 +314,11 @@ else:
     img = cover_image_stream()
 
     if band_name == "SENIOR":
-        kicker("Literacy & Numeracy")
-        pa(pack_label, bold=True, sz=B["h0"], clr=PRI, after=4)
+        kicker("Literacy & Numeracy " + pack_label)
+        pa(title, bold=True, sz=B["h0"], clr=PRI, after=4)
         p = doc.add_paragraph()
         p._p.get_or_add_pPr().append(parse_xml('<w:pBdr %s><w:bottom w:val="single" w:sz="10" w:space="2" w:color="%s"/></w:pBdr>' % (nsdecls("w"), PRI_HEX)))
-        pa(topic_clarified, sz=B["bs"] + 5, clr=INK, before=6, after=2)
+        pa(topic_clarified, sz=B["bs"] + 3, clr=INK, before=6, after=2)
         pa(meta, it=True, clr=GY, after=16)
         if img:
             try:
@@ -316,15 +329,15 @@ else:
     else:
         for _ in range(2):
             doc.add_paragraph()
-        pa(topic, bold=True, sz=B["h0"], clr=PRI, al=WA.CENTER, after=2)
-        pa(pack_label, sz=B["bs"] + 2, clr=SEC, al=WA.CENTER, after=10)
+        pa(title, bold=True, sz=B["h0"], clr=PRI, al=WA.CENTER, after=2)
+        pa(topic, sz=B["bs"] + 1, it=True, clr=SEC, al=WA.CENTER, after=10)
         if img:
             try:
                 ip = doc.add_paragraph(); ip.alignment = WA.CENTER
                 ip.add_run().add_picture(img, width=Cm(min(B["cov_w"], 11.0)))
             except Exception:
                 pass
-        pa(meta, it=True, sz=B["bs"], clr=GY, al=WA.CENTER, after=14)
+        pa(meta + "   |   " + pack_label, it=True, sz=B["bs"], clr=GY, al=WA.CENTER, after=14)
 
     # "belongs to" plate
     t = doc.add_table(rows=1, cols=1); cl = t.rows[0].cells[0]; cl.text = ""
@@ -420,9 +433,11 @@ else:
                 abc = "ABCDEFGHIJKLMNOP"
                 for ri in range(mx):
                     if ri < len(left):
-                        t.rows[ri + 1].cells[0].text = "%d. %s" % (ri + 1, str(left[ri]))
+                        cl = t.rows[ri + 1].cells[0]; cl.text = ""
+                        emit(cl.paragraphs[0], "%d. %s" % (ri + 1, str(left[ri])), sz=B["bs"] - 1)
                     if ri < len(right):
-                        t.rows[ri + 1].cells[2].text = "%s. %s" % (abc[ri], str(right[ri]))
+                        cl = t.rows[ri + 1].cells[2]; cl.text = ""
+                        emit(cl.paragraphs[0], "%s. %s" % (abc[ri], str(right[ri])), sz=B["bs"] - 1)
                     for cix in range(3):
                         cell_pad(t.rows[ri + 1].cells[cix], t=70, b=70)
         if at == "ordering":
@@ -461,7 +476,8 @@ else:
                     for ri, row in enumerate(rws):
                         for ci, val in enumerate(row):
                             if ci < len(hdrs):
-                                cl2 = t.rows[ri + 1].cells[ci]; cl2.text = str(val); cell_pad(cl2, t=60, b=60)
+                                cl2 = t.rows[ri + 1].cells[ci]; cl2.text = ""
+                                emit(cl2.paragraphs[0], str(val), sz=B["bs"] - 1); cell_pad(cl2, t=60, b=60)
                         if ri % 2 == 1:
                             for ci in range(len(hdrs)):
                                 shd(t.rows[ri + 1].cells[ci], B["tint"])

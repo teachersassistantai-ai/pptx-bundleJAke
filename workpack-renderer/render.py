@@ -84,7 +84,9 @@ enrich = pj(enrich_raw) or {}
 topic_clarified = (enrich.get("topic_clarified") or topic or "").strip() or topic
 au_context = (enrich.get("australian_context") or "").strip()
 intro = (intro_raw or "").strip()
-is_multi = bool(timeframe) and any(k in timeframe.lower() for k in ["day", "week"])
+_tf = (timeframe or "").lower()
+# True multi-day only: "1 day"/"2 days"/"3 days"/weeks. "Half day" is single-session.
+is_multi = ("week" in _tf) or ("day" in _tf and "half" not in _tf)
 
 
 def _ok(d):
@@ -140,6 +142,7 @@ else:
             '<w:bottom w:val="single" w:sz="%d" w:color="%s"/><w:right w:val="single" w:sz="%d" w:color="%s"/>'
             '<w:insideH w:val="single" w:sz="%d" w:color="%s"/><w:insideV w:val="single" w:sz="%d" w:color="%s"/>'
             '</w:tblBorders>' % (nsdecls("w"), sz, color, sz, color, sz, color, sz, color, sz, color, sz, color)))
+        cantsplit(tbl)
 
     _RX = re.compile(r"(\*\*.+?\*\*|\*[^*\n]+?\*)")
 
@@ -173,7 +176,12 @@ else:
     def addh(text, lvl):
         h = doc.add_heading("", level=lvl)
         emit(h, text, sz=None, clr=PRI)
+        h.paragraph_format.keep_with_next = True
         return h
+
+    def cantsplit(tbl):
+        for row in tbl.rows:
+            row._tr.get_or_add_trPr().append(parse_xml("<w:cantSplit %s/>" % nsdecls("w")))
 
     def kicker(text):
         p = doc.add_paragraph()
@@ -181,6 +189,7 @@ else:
         r.font.color.rgb = SEC; r.font.name = B["hf"]
         r._r.get_or_add_rPr().append(parse_xml('<w:spacing %s w:val="40"/>' % nsdecls("w")))
         p.paragraph_format.space_after = Pt(0)
+        p.paragraph_format.keep_with_next = True
         return p
 
     def chip(p, text, fill):
@@ -227,6 +236,8 @@ else:
             shd(cl, fill)
         cell_borders(cl, left=accent, box=GRID)
         cell_pad(cl)
+        if kind != "passage":  # short boxes shouldn't split across a page; let long passages flow
+            cantsplit(t)
         doc.add_paragraph().paragraph_format.space_after = Pt(2)
         return t
 
@@ -260,13 +271,17 @@ else:
     def cover_image_stream():
         if not openai_key:
             return None
+        # Use an IP-SAFE generic subject from enrichment (OpenAI refuses real people,
+        # celebrities, brands, logos and copyrighted characters -> silent failure).
+        subj = (enrich.get("image_subject") or "").strip() or topic_clarified
         style = {"PRIMARY": "warm friendly children's book illustration, soft rounded shapes, vibrant colours, hand-drawn feel, playful",
                  "MIDDLE": "modern editorial illustration, clean lines, balanced colour palette, slightly stylised",
                  "SENIOR": "sophisticated editorial illustration, refined limited palette, mature composition"}[band_name]
-        au = (" Australian context: " + au_context + ".") if au_context else ""
-        prompt = ("An illustration capturing the theme of " + topic_clarified + "." + au + " " + style +
-                  ". Suitable as a student workbook cover. ABSOLUTELY NO TEXT, NO WORDS, NO LETTERS, NO NUMBERS "
-                  "anywhere in the image. A single clear focal point, clean uncluttered composition. No borders, no watermark.")
+        prompt = ("An original illustration of: " + subj + ". " + style +
+                  ". Suitable as a student workbook cover. Show only a generic, original scene -- do NOT "
+                  "depict any real or named person, celebrity, athlete, brand, company, logo, trademark, or "
+                  "copyrighted character. ABSOLUTELY NO TEXT, NO WORDS, NO LETTERS, NO NUMBERS anywhere in the "
+                  "image. A single clear focal point, clean uncluttered composition. No borders, no watermark.")
         try:
             resp = requests.post(
                 "https://api.openai.com/v1/images/generations",
@@ -281,7 +296,7 @@ else:
             return None
 
     # ---------- COVER ----------
-    pack_label = "Holiday Work Pack" if is_multi else "Work Pack"
+    pack_label = "Work Pack"
     meta = " / ".join(x for x in [yl, timeframe] if x)
     img = cover_image_stream()
 
@@ -362,7 +377,8 @@ else:
         if bits:
             pa("  ".join(bits), it=True, sz=B["bs"] - 3, clr=GY, after=2)
         if act.get("instructions"):
-            pa(act["instructions"], sz=B["bs"] - 1, after=4)
+            ip = pa(act["instructions"], sz=B["bs"] - 1, after=4)
+            ip.paragraph_format.keep_with_next = True
         render_glossary(act)
         c = act.get("content", {}) if isinstance(act.get("content"), dict) else {}
         at = act.get("activity_type", "")
@@ -375,7 +391,12 @@ else:
                 box(" - ".join(str(w) for w in wb), "wordbank")
             ct = c.get("cloze_text", "")
             if ct:
-                pa(re.sub(r"___\d+___", "____________", str(ct)))
+                # render plain (no markdown) so stray * / blanks don't collide; normalise any blank style
+                ct = str(ct).replace("**", "").replace("*", "")
+                ct = re.sub(r"_{2,}(?:\d+_{2,})?|\b\d+\b(?=\s*_)", "_________", ct)
+                ct = re.sub(r"_{3,}", "_________", ct)
+                p = doc.add_paragraph(); rr = p.add_run(ct)
+                rr.font.size = Pt(B["bs"]); rr.font.name = B["bf"]
         if at == "multiple_choice":
             lbl = ["A", "B", "C", "D"]
             for i, m in enumerate(c.get("mcq_items", []), 1):
@@ -489,7 +510,7 @@ else:
             if isinstance(a, dict):
                 d = a.get("day", 1); d = d if (isinstance(d, int) and d >= 1) else 1
                 days.setdefault(d, []).append(a)
-        multi = len(days) > 1; fi = 0
+        multi = is_multi and len(days) > 1; fi = 0
         for dn in sorted(days.keys()):
             if multi:
                 addh("Day %d" % dn, 3)

@@ -399,8 +399,21 @@ else:
         for para in intro.split("\n"):
             if para.strip():
                 pa(para.strip(), after=8)
-        # warm-up mini-cards (fill the white space, ease into the activities)
-        warm = enrich.get("warmup")
+        # warm-up mini-cards (fill the white space, ease into the activities).
+        # Prefer enrichment.warmup; else compose from data we already have.
+        warm = enrich.get("warmup") if isinstance(enrich.get("warmup"), list) else None
+        if not warm:
+            warm = []
+            _facts = []
+            for _d in (lit, num):
+                if isinstance(_d, dict) and isinstance(_d.get("fun_facts"), list):
+                    _facts += _d["fun_facts"]
+            if _facts:
+                warm.append({"kind": "fact", "text": str(_facts[0])})
+            _vocab = enrich.get("key_vocabulary") if isinstance(enrich.get("key_vocabulary"), list) else []
+            if _vocab:
+                warm.append({"kind": "vocab", "text": "Words you'll meet: " + ", ".join(str(v) for v in _vocab[:4])})
+            warm.append({"kind": "think", "text": "What do you already know about " + (topic or "this topic") + "? What would you like to find out?"})
         if isinstance(warm, list) and warm:
             doc.add_paragraph()
             kicker("Quick Warm-Up")

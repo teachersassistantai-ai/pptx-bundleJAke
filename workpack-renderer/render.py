@@ -188,7 +188,7 @@ else:
             elif tok.startswith("*") and tok.endswith("*"):
                 r = p.add_run(tok[1:-1]); r.italic = True
             else:
-                r = p.add_run(tok); r.italic = base_italic; r.bold = bold_all
+                r = p.add_run(tok.replace("**", "")); r.italic = base_italic; r.bold = bold_all
             r.font.size = Pt(sz); r.font.name = B["bf"]
             if clr:
                 r.font.color.rgb = clr
@@ -431,7 +431,9 @@ else:
                         shd(cl, fill)
                     cell_borders(cl, left=acc, box=GRID); cell_pad(cl)
                 cantsplit(tw)
-        doc.add_page_break()
+        # No page break: let Section 1 flow straight on so the warm-up leads
+        # into the activities and we don't leave half a blank page.
+        doc.add_paragraph()
 
     # ---------- activity renderer ----------
     def render_glossary(act):

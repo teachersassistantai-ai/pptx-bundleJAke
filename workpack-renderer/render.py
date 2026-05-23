@@ -23,35 +23,67 @@ from docx.oxml import parse_xml
 warnings.filterwarnings("ignore", message="You have opted to not authenticate on client instantiation")
 
 
-# ---------- robust JSON parse (handles {"answer": ...} wrapper) --------------
+# ---------- robust JSON parse -----------------------------------------------
+# LLMs (esp. via Relevance's Anthropic path, which doesn't enforce json_object)
+# wrap output in ```json fences AND put literal newlines/tabs inside string
+# values -- both invalid JSON. This parser strips fences and escapes literal
+# control chars inside strings before parsing, plus a brace-extract fallback.
+def _strip_fences(t):
+    t = t.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z0-9]*[ \t]*\n?", "", t)
+        t = re.sub(r"\n?[ \t]*```\s*$", "", t)
+    return t.strip()
+
+
+def _esc_ctrl(t):
+    # escape raw newline/tab/CR that appear INSIDE a JSON string literal
+    out = []
+    in_str = False
+    esc = False
+    for ch in t:
+        if esc:
+            out.append(ch); esc = False; continue
+        if ch == "\\":
+            out.append(ch); esc = True; continue
+        if ch == '"':
+            in_str = not in_str; out.append(ch); continue
+        if in_str and ch == "\n":
+            out.append("\\n"); continue
+        if in_str and ch == "\t":
+            out.append("\\t"); continue
+        if in_str and ch == "\r":
+            out.append("\\r"); continue
+        out.append(ch)
+    return "".join(out)
+
+
 def pj(raw):
     if not raw:
         return None
     if isinstance(raw, dict):
-        if set(raw.keys()) == {"answer"}:
-            return pj(raw["answer"])
-        return raw
+        return pj(raw["answer"]) if set(raw.keys()) == {"answer"} else raw
     if isinstance(raw, list) and raw and isinstance(raw[0], dict):
         return raw[0]
-    t = str(raw).strip()
+    t = _strip_fences(str(raw).strip())
     if t.lower() in ("null", "none", ""):
         return None
-    for cand in (t, t.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")):
+    cands = [t, _esc_ctrl(t), t.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")]
+    try:
+        s, e = t.index("{"), t.rindex("}")
+        inner = t[s:e + 1]
+        cands += [inner, _esc_ctrl(inner)]
+    except Exception:
+        pass
+    for c in cands:
         try:
-            r = json.loads(cand)
+            r = json.loads(c)
             if isinstance(r, dict):
                 return pj(r) if set(r.keys()) == {"answer"} else r
             if isinstance(r, list) and r and isinstance(r[0], dict):
                 return r[0]
         except Exception:
             pass
-    try:
-        s, e = t.index("{"), t.rindex("}")
-        r = json.loads(t[s:e + 1])
-        if isinstance(r, dict):
-            return r
-    except Exception:
-        pass
     return None
 
 
@@ -367,6 +399,27 @@ else:
         for para in intro.split("\n"):
             if para.strip():
                 pa(para.strip(), after=8)
+        # warm-up mini-cards (fill the white space, ease into the activities)
+        warm = enrich.get("warmup")
+        if isinstance(warm, list) and warm:
+            doc.add_paragraph()
+            kicker("Quick Warm-Up")
+            kindcfg = {"fact": ("FFF8E7", "E8A33D", "DID YOU KNOW?"),
+                       "vocab": ("FFFFFF", SEC_HEX, "WORDS TO KNOW"),
+                       "think": (B["tint"], PRI_HEX, "QUICK THINK")}
+            cards = [c for c in warm[:3] if isinstance(c, dict)]
+            if cards:
+                tw = doc.add_table(rows=1, cols=len(cards))
+                tw.alignment = WD_TABLE_ALIGNMENT.CENTER
+                for i, card in enumerate(cards):
+                    fill, acc, lbl = kindcfg.get(card.get("kind", "fact"), kindcfg["fact"])
+                    cl = tw.rows[0].cells[i]; cl.text = ""
+                    p = cl.paragraphs[0]; chip(p, lbl, acc); p.add_run().add_break()
+                    emit(cl.add_paragraph(), card.get("text", ""), sz=B["bs"] - 2)
+                    if B["box"] != "minimal":
+                        shd(cl, fill)
+                    cell_borders(cl, left=acc, box=GRID); cell_pad(cl)
+                cantsplit(tw)
         doc.add_page_break()
 
     # ---------- activity renderer ----------

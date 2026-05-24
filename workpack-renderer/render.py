@@ -431,9 +431,10 @@ else:
                         shd(cl, fill)
                     cell_borders(cl, left=acc, box=GRID); cell_pad(cl)
                 cantsplit(tw)
-        # No page break: let Section 1 flow straight on so the warm-up leads
-        # into the activities and we don't leave half a blank page.
-        doc.add_paragraph()
+        # Welcome + warm-up cards are their own opening page; Section 1 then
+        # starts clean on the next page (avoids orphaning Activity 1's heading
+        # from its content at the bottom of the welcome page).
+        doc.add_page_break()
 
     # ---------- activity renderer ----------
     def render_glossary(act):
@@ -449,12 +450,14 @@ else:
         an = act.get("activity_number", 0)
         # H2 with a number chip
         h = doc.add_heading("", level=2)
+        h.paragraph_format.keep_with_next = True
         chip(h, str(an), PRI_HEX); h.add_run("  ")
         emit(h, act.get("activity_title", "Activity"), sz=None, clr=PRI)
         diff = act.get("difficulty", ""); mins = act.get("estimated_minutes", "")
         bits = [b for b in [diff, ("~%s min" % mins) if mins else ""] if b]
         if bits:
-            pa("  ".join(bits), it=True, sz=B["bs"] - 3, clr=GY, after=2)
+            mp = pa("  ".join(bits), it=True, sz=B["bs"] - 3, clr=GY, after=2)
+            mp.paragraph_format.keep_with_next = True
         if act.get("instructions"):
             ip = pa(act["instructions"], sz=B["bs"] - 1, after=4)
             ip.paragraph_format.keep_with_next = True

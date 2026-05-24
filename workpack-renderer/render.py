@@ -12,7 +12,11 @@
 # Image is generated IN-PROCESS (OpenAI -> base64 -> BytesIO -> add_picture):
 # no temp-URL round trip, which is what was silently dropping the cover.
 # =============================================================================
-import json, re, math, io, base64, warnings, requests, json_repair
+import json, re, math, io, base64, warnings, requests
+try:
+    import json_repair  # best-effort; we never hard-depend on it (package may be absent on a fresh import)
+except Exception:
+    json_repair = None
 from docx import Document
 from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH as WA
@@ -36,26 +40,47 @@ def _strip_fences(t):
     return t.strip()
 
 
-def _esc_ctrl(t):
-    # escape raw newline/tab/CR that appear INSIDE a JSON string literal
+def _heuristic_repair(t):
+    # Self-contained fallback (no dependency): strip fences, escape literal
+    # control chars inside strings, escape stray in-string quotes (a " is a
+    # closing quote only if the next non-space char is : , } or ]), drop
+    # trailing commas. Handles the LLM failure modes json_repair would.
+    t = _strip_fences(t)
     out = []
+    i = 0
+    n = len(t)
     in_str = False
-    esc = False
-    for ch in t:
-        if esc:
-            out.append(ch); esc = False; continue
-        if ch == "\\":
-            out.append(ch); esc = True; continue
-        if ch == '"':
-            in_str = not in_str; out.append(ch); continue
-        if in_str and ch == "\n":
-            out.append("\\n"); continue
-        if in_str and ch == "\t":
-            out.append("\\t"); continue
-        if in_str and ch == "\r":
-            out.append("\\r"); continue
-        out.append(ch)
-    return "".join(out)
+    while i < n:
+        c = t[i]
+        if not in_str:
+            out.append(c)
+            if c == '"':
+                in_str = True
+            i += 1
+            continue
+        if c == "\\":
+            out.append(c)
+            if i + 1 < n:
+                out.append(t[i + 1]); i += 2; continue
+            i += 1; continue
+        if c == "\n":
+            out.append("\\n"); i += 1; continue
+        if c == "\r":
+            out.append("\\r"); i += 1; continue
+        if c == "\t":
+            out.append("\\t"); i += 1; continue
+        if c == '"':
+            j = i + 1
+            while j < n and t[j] in " \t\r\n":
+                j += 1
+            if j >= n or t[j] in ":,}]":
+                out.append('"'); in_str = False
+            else:
+                out.append('\\"')
+            i += 1
+            continue
+        out.append(c); i += 1
+    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
 
 
 def pj(raw):
@@ -68,16 +93,24 @@ def pj(raw):
     t = str(raw).strip()
     if t.lower() in ("null", "none", ""):
         return None
-    # json_repair fixes fences, unescaped quotes (dialogue!), literal control chars,
-    # trailing commas -- everything LLMs get wrong. Try strict first (fast path).
     r = None
+    # 1. strict parse (fast path for clean JSON)
     try:
         r = json.loads(_strip_fences(t))
     except Exception:
+        pass
+    # 2. json_repair library if it's installed (best quality)
+    if not isinstance(r, (dict, list)) and json_repair is not None:
         try:
             r = json_repair.loads(t)
         except Exception:
-            r = None
+            pass
+    # 3. self-contained heuristic repair (no dependency -- always available)
+    if not isinstance(r, (dict, list)):
+        try:
+            r = json.loads(_heuristic_repair(t))
+        except Exception:
+            pass
     if isinstance(r, dict):
         return pj(r) if set(r.keys()) == {"answer"} else (r or None)
     if isinstance(r, list) and r and isinstance(r[0], dict):
